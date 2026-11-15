@@ -144,7 +144,7 @@ contas comuns (limitação documentada).
 ### 6.3 Regras de cancelamento
 
 **`cancelarProjeto(id, motivo)` — só o dono:**
-- `Captando`: sempre (projeto suspeito).
+- `Captando`: enquanto `block.timestamp < prazoCaptacao` (projeto suspeito); depois disso só `encerrarPorPrazo`.
 - `Financiado`: **só depois de vencido `prazoPlantio`** sem registro de plantio (protege a
   comunidade de cancelamento arbitrário).
 - `Plantado`: enquanto `block.timestamp < prazoVerificacao` (prova rejeitada).
@@ -296,7 +296,7 @@ UI tenham mensagem traduzida.
 | Funcoes | tabela 6.6: external/public/internal/private, view/pure, `apoiar` payable, constructor |
 | EstruturasDeControle | `if/else` em liberação e cancelamento, `for` limitado em `_contarProjetosAtivos`, `require` nas validações |
 | ArraysEMappings | `Projeto[] projetos`, `totalApoiadoPor`, `contribuicoes` aninhado, `comunidades` → struct |
-| StructsEEnums | `Projeto` (14 campos), `Comunidade`, `Status` |
+| StructsEEnums | `Projeto` (17 campos), `Comunidade`, `Status` |
 | Modificadores | 6 próprios, 3 com parâmetro |
 | EventosEErros | 10 eventos com `indexed`, erros personalizados com `revert`, `require` |
 
