@@ -499,24 +499,24 @@ function renderizarPainelDono() {
     painel.innerHTML = "<h2>Painel do verificador</h2>";
     return;
   }
-  const t = agora();
   // Plantados: o dono verifica ou rejeita enquanto o prazo de verificação está aberto.
   const plantados = estado.projetos.filter((p) => p.status === STATUS.PLANTADO);
-  // Cancelamento direto (regras do contrato): Captando antes do prazo; Financiado após o prazo de plantio.
+  // Cancelamento direto (regras do contrato): Captando só até o prazo de captação;
+  // Financiado só depois do prazo de plantio. O corte de tempo é feito pela contagem
+  // regressiva (data-ate / data-apos), então os botões aparecem/somem sozinhos.
   const cancelaveis = estado.projetos.filter((p) =>
-    (p.status === STATUS.CAPTANDO && t < p.prazoCaptacao) ||
-    (p.status === STATUS.FINANCIADO && t >= p.prazoPlantio));
+    p.status === STATUS.CAPTANDO || p.status === STATUS.FINANCIADO);
 
   const linhaPlantado = (p) => `
     <li>#${p.id} ${esc(p.titulo)} · prova <code>${esc(abreviar(p.prova))}</code>
       · <span class="contagem" data-prazo="${p.prazoVerificacao}">…</span>
-      <div class="acoes">
+      <div class="acoes" data-ate="${p.prazoVerificacao}">
         <button type="button" class="btn" data-acao="verificar" data-id="${p.id}">Verificar plantio</button>
         <input placeholder="Motivo da rejeição" maxlength="120" data-campo="rej-${p.id}" aria-label="Motivo da rejeição">
         <button type="button" class="btn btn-perigo" data-acao="rejeitar" data-id="${p.id}">Rejeitar prova</button>
       </div></li>`;
   const linhaCancelavel = (p) => `
-    <li>#${p.id} ${esc(p.titulo)} <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span>
+    <li ${p.status === STATUS.CAPTANDO ? `data-ate="${p.prazoCaptacao}"` : `data-apos="${p.prazoPlantio}"`}>#${p.id} ${esc(p.titulo)} <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span>
       <div class="acoes">
         <input placeholder="Motivo do cancelamento" maxlength="120" data-campo="can-${p.id}" aria-label="Motivo do cancelamento">
         <button type="button" class="btn btn-perigo" data-acao="cancelar" data-id="${p.id}">Cancelar projeto</button>
@@ -610,8 +610,11 @@ async function atualizarTudo() {
     estado.dono = null;
     estado.ehDono = false;
     estado.comunidade = null;
-    estado.projetos = [];
-    estado.totalApoiado = 0n;
+    // estado.projetos só é trocado quando a leitura nova dá certo (se falhar, a lista antiga fica).
+    if (!contratoConfigurado() || !naSepolia) {
+      estado.projetos = [];
+      estado.totalApoiado = 0n;
+    }
     // Uma leitura bem-sucedida apaga o aviso de erro antigo (inclusive em rede errada).
     if ($("aviso-geral").textContent === MSG_ERRO_LEITURA) mostrarAviso("");
     if (!contratoConfigurado()) {
