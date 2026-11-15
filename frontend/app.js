@@ -291,21 +291,21 @@ function frase(ev) {
     case "ComunidadeDesativada":
       return `${ator(v.conta)} foi desativada como comunidade`;
     case "ProjetoCriado":
-      return `${ator(v.comunidade)} criou o projeto #${v.id} “${esc(v.titulo)}” (meta ${formatarEth(BigInt(v.meta))} ETH)`;
+      return `${ator(v.comunidade)} criou o projeto nº ${v.id} “${esc(v.titulo)}” (meta ${formatarEth(BigInt(v.meta))} ETH)`;
     case "ApoioRecebido":
-      return `${ator(v.apoiador)} apoiou o projeto #${v.id} com ${formatarEth(BigInt(v.valor))} ETH`;
+      return `${ator(v.apoiador)} apoiou o projeto nº ${v.id} com ${formatarEth(BigInt(v.valor))} ETH`;
     case "ProjetoFinanciado":
-      return `O projeto #${v.id} atingiu a meta (${formatarEth(BigInt(v.arrecadado))} ETH) e foi financiado`;
+      return `O projeto nº ${v.id} atingiu a meta (${formatarEth(BigInt(v.arrecadado))} ETH) e foi financiado`;
     case "PlantioRegistrado":
-      return `Plantio registrado no projeto #${v.id} (prova ${esc(abreviar(v.prova))})`;
+      return `Plantio registrado no projeto nº ${v.id} (prova ${esc(abreviar(v.prova))})`;
     case "PlantioVerificado":
-      return `${ator(v.verificador)} verificou o plantio do projeto #${v.id}`;
+      return `${ator(v.verificador)} verificou o plantio do projeto nº ${v.id}`;
     case "ProjetoCancelado":
-      return `O projeto #${v.id} foi cancelado: “${esc(v.motivo)}” (${formatarEth(BigInt(v.saldoReembolsavel))} ETH reembolsáveis)`;
+      return `O projeto nº ${v.id} foi cancelado: “${esc(v.motivo)}” (${formatarEth(BigInt(v.saldoReembolsavel))} ETH reembolsáveis)`;
     case "SaqueRealizado":
-      return `${ator(v.comunidade)} sacou ${formatarEth(BigInt(v.valor))} ETH do projeto #${v.id}`;
+      return `${ator(v.comunidade)} sacou ${formatarEth(BigInt(v.valor))} ETH do projeto nº ${v.id}`;
     case "ReembolsoRealizado":
-      return `${ator(v.apoiador)} recebeu reembolso de ${formatarEth(BigInt(v.valor))} ETH do projeto #${v.id}`;
+      return `${ator(v.apoiador)} recebeu reembolso de ${formatarEth(BigInt(v.valor))} ETH do projeto nº ${v.id}`;
     default:
       return esc(ev.event || "Evento");
   }
@@ -357,9 +357,9 @@ function renderizarPreservando(raiz, html) {
 
 // Prazo (timestamp) do estado atual do projeto + rótulo, ou null se o estado é final.
 function prazoAtual(p) {
-  if (p.status === STATUS.CAPTANDO) return { ts: p.prazoCaptacao, rotulo: "Captação termina em" };
-  if (p.status === STATUS.FINANCIADO) return { ts: p.prazoPlantio, rotulo: "Prazo de plantio termina em" };
-  if (p.status === STATUS.PLANTADO) return { ts: p.prazoVerificacao, rotulo: "Prazo de verificação termina em" };
+  if (p.status === STATUS.CAPTANDO) return { ts: p.prazoCaptacao, rotulo: "Prazo da captação:" };
+  if (p.status === STATUS.FINANCIADO) return { ts: p.prazoPlantio, rotulo: "Prazo do plantio:" };
+  if (p.status === STATUS.PLANTADO) return { ts: p.prazoVerificacao, rotulo: "Prazo da verificação:" };
   return null;
 }
 
@@ -593,8 +593,8 @@ function atualizarContagens() {
   document.querySelectorAll(".contagem").forEach((el) => {
     const restante = Number(el.dataset.prazo) - t;
     el.textContent = restante > 0
-      ? formatarDuracao(restante)
-      : "prazo encerrado — pode ser encerrado por qualquer pessoa";
+      ? `faltam ${formatarDuracao(restante)}`
+      : "vencido. Qualquer pessoa pode encerrar o projeto.";
   });
   // Botões que só valem depois do prazo (encerrar) ou só até o prazo (apoiar, registrar prova).
   document.querySelectorAll("[data-apos]").forEach((el) => { el.hidden = t < Number(el.dataset.apos); });
@@ -733,11 +733,15 @@ function bloquearAcoes(bloquear) {
     .forEach((el) => { el.disabled = bloquear; });
 }
 
-// Escreve uma linha de status na lista "Transações". icone: ⏳ / ✅ / ❌.
-function escreverLinhaTx(li, icone, texto, hash) {
+// Escreve uma linha de status na lista "Transações".
+// situacao: "pendente", "confirmada" ou "falhou" (vira a cor da borda via classe tx-*).
+const CLASSE_TX = { pendente: "tx-pendente", confirmada: "tx-ok", falhou: "tx-erro" };
+function escreverLinhaTx(li, situacao, texto, hash) {
+  li.className = CLASSE_TX[situacao];
   li.innerHTML =
-    `${icone} ${esc(texto)}` +
-    (hash ? ` <a href="${linkTx(hash)}" target="_blank" rel="noopener">${esc(abreviar(hash))} ↗</a>` : "");
+    `<span class="tx-situacao">${situacao === "pendente" ? "Aguardando confirmação" : situacao === "confirmada" ? "Confirmada" : "Falhou"}</span>` +
+    esc(texto) +
+    (hash ? ` <a href="${linkTx(hash)}" target="_blank" rel="noopener">${esc(abreviar(hash))}</a>` : "");
 }
 
 // Erro de validação feito por nós (já está em português; não precisa de tradução).
@@ -788,7 +792,8 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
     const recibo = await metodo.send(opcoes).on("transactionHash", (hash) => {
       hashTx = hash;
       linha = document.createElement("li");
-      escreverLinhaTx(linha, "⏳", `${descricao} — pendente`, hash);
+      escreverLinhaTx(linha, "pendente", descricao, hash);
+      $("transacoes").querySelector(".sem-tx")?.remove();
       $("transacoes").prepend(linha);
       mostrarAviso("Transação enviada. Aguardando confirmação…");
     });
@@ -796,7 +801,7 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
     // O recibo diz se a execução deu certo (status 1) ou reverteu (status 0).
     // (No Web3.js v4 um revert minerado normalmente cai no catch; este ramo é só garantia.)
     sucesso = Number(recibo.status) === 1;
-    if (linha) escreverLinhaTx(linha, sucesso ? "✅" : "❌", `${descricao} — ${sucesso ? "confirmada" : "falhou"}`, recibo.transactionHash);
+    if (linha) escreverLinhaTx(linha, sucesso ? "confirmada" : "falhou", descricao, recibo.transactionHash);
     if (!sucesso) mensagemErro = "A transação foi enviada, mas falhou na blockchain.";
   } catch (e) {
     console.error(e);
@@ -811,7 +816,7 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
       mensagemErro = traduzirErro(e);
     }
     // A linha ❌ mantém o hash para o usuário abrir a transação no Etherscan.
-    if (linha) escreverLinhaTx(linha, "❌", `${descricao} — falhou`, hashTx);
+    if (linha) escreverLinhaTx(linha, "falhou", descricao, hashTx);
   } finally {
     // 5. Libera os botões e relê a blockchain (atualizarTudo também recarrega o histórico).
     estado.txPendente = false;
@@ -971,16 +976,16 @@ const ACOES = {
   async apoiar(id) {
     const valor = lerValorEth(textoDe(`valor-${id}`)); // erro de validação: nada é enviado
     await enviarTransacao(estado.contrato.methods.apoiar(id), { value: valor },
-      `Apoiar o projeto #${id} com ${formatarEth(valor)} ETH`);
+      `Apoiar o projeto nº ${id} com ${formatarEth(valor)} ETH`);
   },
   async encerrar(id) {
-    await enviarTransacao(estado.contrato.methods.encerrarPorPrazo(id), {}, `Encerrar o projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.encerrarPorPrazo(id), {}, `Encerrar o projeto nº ${id}`);
   },
   async reembolsar(id) {
-    await enviarTransacao(estado.contrato.methods.pedirReembolso(id), {}, `Reembolso do projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.pedirReembolso(id), {}, `Reembolso do projeto nº ${id}`);
   },
   async sacar(id) {
-    await enviarTransacao(estado.contrato.methods.sacar(id), {}, `Saque do projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.sacar(id), {}, `Saque do projeto nº ${id}`);
   },
   // Escolher o arquivo já dispara o envio (evento "change" do input file).
   async "registrar-plantio"(id, input) {
@@ -989,23 +994,23 @@ const ACOES = {
     try {
       const hash = await hashArquivo(arquivo);
       await enviarTransacao(estado.contrato.methods.registrarPlantio(id, hash), {},
-        `Registrar plantio do projeto #${id} (hash da prova ${hash})`);
+        `Registrar plantio do projeto nº ${id} (hash da prova ${hash})`);
     } finally {
       input.value = ""; // libera a atualização automática, que pausa com arquivo escolhido
     }
   },
   async verificar(id) {
-    await enviarTransacao(estado.contrato.methods.verificarPlantio(id), {}, `Verificar plantio do projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.verificarPlantio(id), {}, `Verificar plantio do projeto nº ${id}`);
   },
   async rejeitar(id) {
     // Sem prompt() (não funciona em navegadores de celular): usa o campo ao lado do botão.
     const motivo = textoDe(`rej-${id}`) || "Prova rejeitada pelo verificador";
     await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {},
-      `Rejeitar prova do projeto #${id}`);
+      `Rejeitar prova do projeto nº ${id}`);
   },
   async cancelar(id) {
     const motivo = textoDe(`can-${id}`) || "Projeto cancelado pelo verificador";
-    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {}, `Cancelar o projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {}, `Cancelar o projeto nº ${id}`);
   },
   async "criar-projeto"() {
     const titulo = textoDe("cp-titulo");
