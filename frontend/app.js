@@ -9,7 +9,8 @@
 //   6. Leitura de projetos, apoios e histórico (somente leitura, .call())
 //   7. Renderização (totais, cards, painéis por papel, histórico)
 //   8. Orquestração da tela (atualizarTudo)
-//   9. Inicialização, contagem regressiva e eventos da carteira
+//   9. Transações, status e erros (enviarTransacao, traduzirErro, ações da tela)
+//  10. Inicialização, contagem regressiva e eventos da carteira
 
 // ---------------------------------------------------------------------------
 // 1. Constantes e estado
@@ -362,7 +363,7 @@ function renderizarTotais() {
 }
 
 // Botões e campos do card conforme o estado do projeto e o papel da conta.
-// Os cliques são tratados na tarefa seguinte (data-acao + data-id).
+// Os cliques são tratados na seção 9 (data-acao + data-id, por delegação de eventos).
 // Elementos com data-apos / data-ate aparecem/somem sozinhos quando o prazo passa
 // (a contagem regressiva do item 9 faz isso a cada segundo, sem reler a blockchain).
 function acoesDoProjeto(p) {
@@ -375,7 +376,7 @@ function acoesDoProjeto(p) {
     if (estado.conta) {
       partes.push(
         `<span data-ate="${p.prazoCaptacao}">` +
-        `<input type="number" min="0" step="0.001" value="0.01" size="6" aria-label="Valor em ETH" data-campo="valor-${p.id}"> ETH ` +
+        `<input type="text" inputmode="decimal" value="0,01" size="6" aria-label="Valor em ETH" data-campo="valor-${p.id}"> ETH ` +
         `<button type="button" class="btn" data-acao="apoiar" data-id="${p.id}">Apoiar</button></span>`
       );
     } else {
@@ -450,7 +451,7 @@ function renderizarPainelComunidade() {
          <input required maxlength="80" placeholder="Título" data-campo="cp-titulo" aria-label="Título">
          <input required maxlength="80" placeholder="Local (ex.: Manacapuru - AM)" data-campo="cp-local" aria-label="Local">
          <input required type="number" min="1" step="1" placeholder="Mudas" data-campo="cp-mudas" aria-label="Quantidade de mudas">
-         <input required type="number" min="0" step="0.001" placeholder="Meta (ETH)" data-campo="cp-meta" aria-label="Meta em ETH">
+         <input required type="text" inputmode="decimal" placeholder="Meta (ETH, ex.: 1,5)" data-campo="cp-meta" aria-label="Meta em ETH">
          <input required type="number" min="1" step="1" placeholder="Captação (min)" data-campo="cp-captacao" aria-label="Duração da captação em minutos">
          <input required type="number" min="1" step="1" placeholder="Plantio (min)" data-campo="cp-plantio" aria-label="Prazo de plantio em minutos">
          <button type="submit" class="btn">Criar projeto</button>
@@ -551,6 +552,8 @@ function renderizarPaineis() {
   renderizarMeusApoios();
   renderizarPainelDono();
   atualizarContagens();
+  // Se há transação em andamento, os botões recém-desenhados já nascem bloqueados.
+  bloquearAcoes(estado.txPendente);
 }
 
 // Contagem regressiva: roda a cada 1 s e só mexe no texto/visibilidade (não relê a blockchain).
@@ -669,7 +672,329 @@ function renderizarCabecalho(naSepolia, temCarteira, saldo) {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Inicialização, contagem regressiva e eventos da carteira
+// 9. Transações, status e erros
+// ---------------------------------------------------------------------------
+// Toda ação que ESCREVE na blockchain passa por enviarTransacao():
+//   validar -> simular (call) -> enviar (send) -> acompanhar -> atualizar a tela.
+// Se algo der errado, traduzirErro() transforma o erro técnico em português.
+
+// "0,01" ou "0.01" -> wei (BigInt). Só aceita número positivo com até 18 casas decimais.
+function lerValorEth(texto) {
+  const limpo = String(texto).trim().replace(",", ".");
+  if (!/^\d+(\.\d{1,18})?$/.test(limpo)) throw new Error("Valor inválido: use, por exemplo, 0,01");
+  const wei = BigInt(estado.web3.utils.toWei(limpo, "ether"));
+  if (wei <= 0n) throw new Error("Valor inválido: use, por exemplo, 0,01");
+  return wei;
+}
+
+// keccak256 dos bytes do arquivo: é a "prova" gravada na blockchain (bytes32).
+async function hashArquivo(file) {
+  return estado.web3.utils.keccak256(new Uint8Array(await file.arrayBuffer()));
+}
+
+// Liga/desliga os botões de ação (evita enviar duas transações ao mesmo tempo).
+function bloquearAcoes(bloquear) {
+  document
+    .querySelectorAll('button[data-acao], input[type="file"][data-acao], form[data-acao] button')
+    .forEach((el) => { el.disabled = bloquear; });
+}
+
+// Escreve uma linha de status na lista "Transações". icone: ⏳ / ✅ / ❌.
+function escreverLinhaTx(li, icone, texto, hash) {
+  li.innerHTML =
+    `${icone} ${esc(texto)}` +
+    (hash ? ` <a href="${linkTx(hash)}" target="_blank" rel="noopener">${esc(abreviar(hash))} ↗</a>` : "");
+}
+
+// Erro de validação feito por nós (já está em português; não precisa de tradução).
+class ErroDeUsuario extends Error {}
+
+// Envia uma transação. "metodo" é o objeto retornado por contrato.methods.x(...).
+// Devolve true se a transação foi confirmada com sucesso.
+async function enviarTransacao(metodo, { value } = {}, descricao = "Transação") {
+  // 1. Bloqueios: uma transação por vez e só na Sepolia.
+  if (estado.txPendente) {
+    mostrarAviso("Aguarde a transação anterior terminar.", "erro");
+    return false;
+  }
+  if (!estado.conta) {
+    mostrarAviso("Conecte a carteira antes de continuar.", "erro");
+    return false;
+  }
+  if (!estado.naSepolia) {
+    mostrarAviso("Você está na rede errada. Use a rede Sepolia.", "erro");
+    return false;
+  }
+  estado.txPendente = true;
+  bloquearAcoes(true);
+
+  let sucesso = false;
+  let mensagemErro = null;
+  let linha = null; // <li> da transação (só existe depois que a carteira assina)
+  try {
+    const opcoes = { from: estado.conta };
+
+    // 2. Se a ação envia ETH, confere o saldo antes de incomodar a carteira.
+    if (value) {
+      const saldo = BigInt(await estado.web3.eth.getBalance(estado.conta));
+      if (saldo < value) {
+        throw new ErroDeUsuario(`Saldo insuficiente: você tem ${formatarEth(saldo)} ETH e precisa de ${formatarEth(value)} ETH (mais o gas).`);
+      }
+      opcoes.value = value.toString();
+    }
+
+    // 3. Simulação: .call() roda a função sem gastar gas. Se ela reverteria, o erro
+    //    aparece aqui, com mensagem clara, antes de abrir o pop-up da carteira.
+    await metodo.call(opcoes);
+
+    // 4. Envio real. A carteira pede confirmação; "transactionHash" chega assim que
+    //    a transação é assinada e enviada (ainda não confirmada).
+    mostrarAviso(`Confirme na MetaMask: ${descricao}`);
+    const recibo = await metodo.send(opcoes).on("transactionHash", (hash) => {
+      linha = document.createElement("li");
+      escreverLinhaTx(linha, "⏳", `${descricao} — pendente`, hash);
+      $("transacoes").prepend(linha);
+      mostrarAviso("Transação enviada. Aguardando confirmação…");
+    });
+
+    // O recibo diz se a execução deu certo (status 1) ou reverteu (status 0).
+    sucesso = Number(recibo.status) === 1;
+    if (linha) escreverLinhaTx(linha, sucesso ? "✅" : "❌", `${descricao} — ${sucesso ? "confirmada" : "falhou"}`, recibo.transactionHash);
+    if (!sucesso) mensagemErro = "A transação foi enviada, mas falhou na blockchain.";
+  } catch (e) {
+    console.error(e);
+    mensagemErro = e instanceof ErroDeUsuario ? e.message : traduzirErro(e);
+    if (linha) escreverLinhaTx(linha, "❌", `${descricao} — falhou`);
+  } finally {
+    // 5. Libera os botões e relê a blockchain (atualizarTudo também recarrega o histórico).
+    estado.txPendente = false;
+    bloquearAcoes(false);
+    await atualizarTudo();
+    // atualizarTudo limpa a faixa de avisos, então o resultado é mostrado por último.
+    if (mensagemErro) mostrarAviso(mensagemErro, "erro");
+    else if (sucesso) mostrarAviso(`${descricao}: confirmada.`, "sucesso");
+  }
+  return sucesso;
+}
+
+// ---- Tradução de erros ----------------------------------------------------
+
+// Percorre o erro e tudo que há dentro dele (cause, innerError, data, originalError…).
+// "visitante" é chamado em cada objeto; o primeiro resultado diferente de undefined vence.
+// A MetaMask e o Web3.js aninham o mesmo erro de formas diferentes, por isso a busca é recursiva.
+function buscarNoErro(valor, visitante, visto = new Set(), nivel = 0) {
+  if (!valor || typeof valor !== "object" || visto.has(valor) || nivel > 8) return undefined;
+  visto.add(valor);
+  const achado = visitante(valor);
+  if (achado !== undefined) return achado;
+  const chaves = new Set([...Object.keys(valor), "cause", "innerError", "originalError", "data", "error"]);
+  for (const chave of chaves) {
+    const r = buscarNoErro(valor[chave], visitante, visto, nivel + 1);
+    if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
+// Seletor (4 primeiros bytes do hash da assinatura) -> item "error" da ABI.
+// Ex.: "ValorInvalido()" -> 0x...; é assim que o EVM identifica o erro personalizado.
+function seletoresDeErro() {
+  const mapa = {};
+  CONTRATO.abi.filter((item) => item.type === "error").forEach((item) => {
+    const assinatura = `${item.name}(${item.inputs.map((i) => i.type).join(",")})`;
+    mapa[estado.web3.eth.abi.encodeFunctionSignature(assinatura).toLowerCase()] = item;
+  });
+  return mapa;
+}
+
+// Descobre qual erro do contrato ocorreu: { nome, args } ou null.
+function identificarErroDoContrato(err) {
+  // Caminho 1: o Web3.js já decodificou (errorName + errorArgs).
+  const pronto = buscarNoErro(err, (o) =>
+    typeof o.errorName === "string" ? { nome: o.errorName, args: o.errorArgs || {} } : undefined);
+  if (pronto) return pronto;
+
+  // Caminho 2: achar os bytes brutos do revert (0x + seletor + argumentos) e decodificar.
+  const dados = buscarNoErro(err, (o) =>
+    typeof o.data === "string" && /^0x[0-9a-fA-F]{8}/.test(o.data) ? o.data : undefined);
+  if (!dados) return null;
+  const seletor = dados.slice(0, 10).toLowerCase();
+  if (seletor === "0x08c379a0") { // Error(string): é o que "require(cond, 'texto')" devolve
+    const decodificado = estado.web3.eth.abi.decodeParameters(["string"], "0x" + dados.slice(10));
+    return { nome: "Error", args: { 0: decodificado[0] } };
+  }
+  const item = seletoresDeErro()[seletor];
+  if (!item) return null;
+  return { nome: item.name, args: estado.web3.eth.abi.decodeParameters(item.inputs, "0x" + dados.slice(10)) };
+}
+
+// Transforma qualquer erro (carteira, Web3.js, contrato) em uma frase em português.
+function traduzirErro(err) {
+  // Usuário clicou em "Rejeitar" na MetaMask (código EIP-1193 4001).
+  if (buscarNoErro(err, (o) => (o.code === 4001 ? true : undefined))) {
+    return "Você cancelou a transação na MetaMask.";
+  }
+
+  // Todas as mensagens de texto do erro juntas, para procurar frases conhecidas.
+  const textos = [];
+  buscarNoErro(err, (o) => { if (typeof o.message === "string") textos.push(o.message); });
+  if (typeof err === "string") textos.push(err);
+  const mensagem = textos.join(" | ");
+
+  // Erro personalizado do contrato.
+  let erro = null;
+  try { erro = identificarErroDoContrato(err); } catch (e) { console.error(e); }
+  if (erro) {
+    const a = erro.args;
+    switch (erro.nome) {
+      case "NaoAutorizado": return "Esta conta não tem permissão para essa ação.";
+      case "ProjetoInexistente": return "Projeto não encontrado.";
+      // Só o estado atual é informado: "esperado" não faz sentido em funções que servem a vários estados.
+      case "EstadoInvalido": return `Ação indisponível: o projeto está em ${NOMES_STATUS[Number(a[1])] || "outro estado"}.`;
+      case "PrazoNaoEncerrado": return `O prazo ainda não terminou na blockchain: aguarde ~${Number(BigInt(a[1]) - BigInt(a[0]))} s.`;
+      case "PrazoEncerrado": return "O prazo desta etapa já terminou.";
+      case "ValorInvalido": return "Informe um valor maior que zero.";
+      case "NadaASacar": return "Não há valor liberado para saque agora.";
+      case "NadaAReembolsar": return "Você não tem valor a reembolsar neste projeto.";
+      case "ReputacaoInsuficiente": return `Reputação da comunidade muito baixa (${a[0]}) para criar projetos.`;
+      case "LimiteDeProjetosAtingido": return `Limite de ${a[0]} projetos atingido.`;
+      case "TransferenciaFalhou": return "A transferência de ETH falhou.";
+      case "Error": return String(a[0]); // texto de um require
+    }
+  }
+
+  if (/insufficient funds/i.test(mensagem)) return "Saldo insuficiente para valor + gas.";
+  // Alguns nós só devolvem "execution reverted: texto" na mensagem.
+  const revert = /execution reverted:?\s*([^|]+)/i.exec(mensagem);
+  if (revert && revert[1].trim()) return revert[1].trim();
+
+  const curta = (textos[0] || "sem detalhes").slice(0, 120);
+  return `Erro inesperado: ${curta}`;
+}
+
+// ---- Ações ligadas aos botões e formulários ---------------------------------
+// Cada ação lê os campos, valida e chama enviarTransacao. As funções recebem o id
+// (data-id) e o elemento que disparou o evento. Se uma validação falhar, o erro
+// lançado aqui vira aviso em executarAcao (nenhuma transação é enviada).
+
+const campo = (nome) => document.querySelector(`[data-campo="${nome}"]`);
+const textoDe = (nome) => (campo(nome) ? campo(nome).value.trim() : "");
+const limparCampos = (prefixo) =>
+  document.querySelectorAll(`[data-campo^="${prefixo}"]`).forEach((el) => { el.value = ""; });
+
+// Endereço digitado -> endereço em formato checksum, ou erro.
+function lerEndereco(texto) {
+  if (!estado.web3.utils.isAddress(texto)) throw new Error("Endereço inválido: informe um endereço 0x… com 42 caracteres.");
+  return estado.web3.utils.toChecksumAddress(texto);
+}
+
+// Inteiro positivo digitado -> texto numérico, ou erro.
+function lerInteiro(texto, rotulo) {
+  if (!/^\d+$/.test(texto) || BigInt(texto) <= 0n) throw new Error(`${rotulo}: informe um número inteiro maior que zero.`);
+  return texto;
+}
+
+const ACOES = {
+  async apoiar(id) {
+    const valor = lerValorEth(textoDe(`valor-${id}`)); // erro de validação: nada é enviado
+    await enviarTransacao(estado.contrato.methods.apoiar(id), { value: valor },
+      `Apoiar o projeto #${id} com ${formatarEth(valor)} ETH`);
+  },
+  async encerrar(id) {
+    await enviarTransacao(estado.contrato.methods.encerrarPorPrazo(id), {}, `Encerrar o projeto #${id}`);
+  },
+  async reembolsar(id) {
+    await enviarTransacao(estado.contrato.methods.pedirReembolso(id), {}, `Reembolso do projeto #${id}`);
+  },
+  async sacar(id) {
+    await enviarTransacao(estado.contrato.methods.sacar(id), {}, `Saque do projeto #${id}`);
+  },
+  // Escolher o arquivo já dispara o envio (evento "change" do input file).
+  async "registrar-plantio"(id, input) {
+    const arquivo = input.files[0];
+    if (!arquivo) return;
+    try {
+      const hash = await hashArquivo(arquivo);
+      await enviarTransacao(estado.contrato.methods.registrarPlantio(id, hash), {},
+        `Registrar plantio do projeto #${id} (hash da prova ${hash})`);
+    } finally {
+      input.value = ""; // libera a atualização automática, que pausa com arquivo escolhido
+    }
+  },
+  async verificar(id) {
+    await enviarTransacao(estado.contrato.methods.verificarPlantio(id), {}, `Verificar plantio do projeto #${id}`);
+  },
+  async rejeitar(id) {
+    const motivo = prompt("Motivo da rejeição da prova:", textoDe(`rej-${id}`) || "Prova rejeitada pelo verificador");
+    if (motivo === null) return; // clicou em Cancelar no prompt
+    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo.trim() || "Prova rejeitada pelo verificador"), {},
+      `Rejeitar prova do projeto #${id}`);
+  },
+  async cancelar(id) {
+    const motivo = textoDe(`can-${id}`) || "Projeto cancelado pelo verificador";
+    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {}, `Cancelar o projeto #${id}`);
+  },
+  async "criar-projeto"() {
+    const titulo = textoDe("cp-titulo");
+    const local = textoDe("cp-local");
+    if (!titulo || !local) throw new Error("Preencha título e local.");
+    const mudas = lerInteiro(textoDe("cp-mudas"), "Mudas");
+    const meta = lerValorEth(textoDe("cp-meta"));
+    const captacao = lerInteiro(textoDe("cp-captacao"), "Captação (min)");
+    const plantio = lerInteiro(textoDe("cp-plantio"), "Plantio (min)");
+    const ok = await enviarTransacao(
+      estado.contrato.methods.criarProjeto(titulo, local, mudas, meta.toString(), captacao, plantio), {},
+      `Criar o projeto “${titulo}”`);
+    if (ok) limparCampos("cp-");
+  },
+  async "cadastrar-comunidade"() {
+    const endereco = lerEndereco(textoDe("cc-endereco"));
+    const nome = textoDe("cc-nome");
+    if (!nome) throw new Error("Informe o nome da comunidade.");
+    const ok = await enviarTransacao(estado.contrato.methods.cadastrarComunidade(endereco, nome), {},
+      `Cadastrar a comunidade “${nome}”`);
+    if (ok) limparCampos("cc-");
+  },
+  async "desativar-comunidade"() {
+    const endereco = lerEndereco(textoDe("dc-endereco"));
+    const ok = await enviarTransacao(estado.contrato.methods.desativarComunidade(endereco), {},
+      `Desativar a comunidade ${abreviar(endereco)}`);
+    if (ok) limparCampos("dc-");
+  },
+};
+
+// Executa a ação pedida. Erros de validação (lançados pelas ações) viram aviso.
+async function executarAcao(nome, id, elemento) {
+  const acao = ACOES[nome];
+  if (!acao || estado.txPendente) return;
+  try {
+    await acao(id, elemento);
+  } catch (e) {
+    mostrarAviso(e && e.message ? e.message : traduzirErro(e), "erro");
+  }
+}
+
+// Delegação de eventos: UM listener no documento atende todos os botões, inclusive os
+// redesenhados a cada atualização. (Ligar listener em cada botão duplicaria chamadas.)
+function ligarAcoes() {
+  document.addEventListener("click", (e) => {
+    const botao = e.target.closest("button[data-acao]");
+    if (botao) executarAcao(botao.dataset.acao, botao.dataset.id, botao);
+  });
+  document.addEventListener("change", (e) => {
+    if (e.target.matches('input[type="file"][data-acao]')) {
+      executarAcao(e.target.dataset.acao, e.target.dataset.id, e.target);
+    }
+  });
+  document.addEventListener("submit", (e) => {
+    const form = e.target.closest("form[data-acao]");
+    if (!form) return;
+    e.preventDefault(); // não recarregar a página
+    executarAcao(form.dataset.acao, null, form);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 10. Inicialização, contagem regressiva e eventos da carteira
 // ---------------------------------------------------------------------------
 
 // O usuário está digitando ou escolheu um arquivo? Então a atualização automática espera.
@@ -680,6 +1005,7 @@ function usuarioEditando() {
 }
 
 async function iniciar() {
+  ligarAcoes();
   $("btn-conectar").addEventListener("click", conectarCarteira);
   $("btn-trocar-rede").addEventListener("click", trocarParaSepolia);
 
