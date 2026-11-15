@@ -245,4 +245,128 @@ contract FlorestaViva {
     function projetosDaComunidade(address conta) external view returns (uint256[] memory ids) {
         return comunidades[conta].projetos;
     }
+
+    // ------------------------------------------------------------------
+    // Projetos: criacao e leituras
+    // ------------------------------------------------------------------
+
+    /// @notice Cria um projeto de reflorestamento (a comunidade precisa estar ativa).
+    /// @param titulo Titulo do projeto (nao vazio, ate MAX_TEXTO bytes).
+    /// @param local Local do plantio (nao vazio, ate MAX_TEXTO bytes).
+    /// @param quantidadeMudas Quantidade de mudas a plantar (maior que zero).
+    /// @param meta Meta de arrecadacao em wei (maior que zero).
+    /// @param duracaoCaptacaoMin Duracao da captacao em minutos (1 a MAX_DURACAO_MIN).
+    /// @param duracaoPlantioMin Prazo para plantar, em minutos, apos financiar (1 a MAX_DURACAO_MIN).
+    /// @return id Id do novo projeto.
+    // [Recurso: Funcoes]
+    function criarProjeto(
+        string calldata titulo,
+        string calldata local,
+        uint256 quantidadeMudas,
+        uint256 meta,
+        uint256 duracaoCaptacaoMin,
+        uint256 duracaoPlantioMin
+    )
+        external
+        apenasComunidadeAtiva // [Recurso: Modificadores]
+        returns (uint256 id)
+    {
+        _validarDadosProjeto(titulo, local, quantidadeMudas, meta, duracaoCaptacaoMin, duracaoPlantioMin);
+
+        Comunidade storage c = comunidades[msg.sender];
+        if (c.reputacao < REPUTACAO_MINIMA) {
+            revert ReputacaoInsuficiente(c.reputacao); // [Recurso: EventosEErros]
+        }
+        if (c.projetos.length >= MAX_PROJETOS_POR_COMUNIDADE) {
+            revert LimiteDeProjetosAtingido(MAX_PROJETOS_POR_COMUNIDADE); // [Recurso: EventosEErros]
+        }
+        if (_contarProjetosAtivos(msg.sender) >= MAX_PROJETOS_ATIVOS) {
+            revert LimiteDeProjetosAtingido(MAX_PROJETOS_ATIVOS); // [Recurso: EventosEErros]
+        }
+
+        id = projetos.length;
+        uint256 prazo = block.timestamp + duracaoCaptacaoMin * 1 minutes;
+
+        // [Recurso: StructsEEnums] campos nao informados comecam em zero.
+        projetos.push(
+            Projeto({
+                id: id,
+                comunidade: payable(msg.sender),
+                titulo: titulo,
+                local: local,
+                quantidadeMudas: quantidadeMudas,
+                meta: meta,
+                arrecadado: 0,
+                sacado: 0,
+                saldoReembolsavel: 0,
+                prazoCaptacao: prazo,
+                duracaoPlantio: duracaoPlantioMin * 1 minutes,
+                prazoPlantio: 0,
+                prazoVerificacao: 0,
+                contribuicoesReembolsadas: 0,
+                totalReembolsado: 0,
+                provaPlantio: bytes32(0),
+                status: Status.Captando
+            })
+        );
+        c.projetos.push(id); // [Recurso: ArraysEMappings]
+
+        emit ProjetoCriado(id, msg.sender, titulo, meta, prazo); // [Recurso: EventosEErros]
+    }
+
+    /// @notice Quantidade total de projetos ja criados.
+    /// @return Total de projetos.
+    // [Recurso: Funcoes]
+    function totalProjetos() public view returns (uint256) {
+        return projetos.length;
+    }
+
+    /// @notice Devolve todos os dados de um projeto.
+    /// @param id Id do projeto.
+    /// @return O projeto completo.
+    // [Recurso: Funcoes]
+    function obterProjeto(uint256 id)
+        external
+        view
+        projetoExiste(id) // [Recurso: Modificadores]
+        returns (Projeto memory)
+    {
+        return projetos[id];
+    }
+
+    /// @dev Valida os textos, numeros e duracoes de um novo projeto.
+    // [Recurso: Funcoes]
+    function _validarDadosProjeto(
+        string calldata titulo,
+        string calldata local,
+        uint256 mudas,
+        uint256 meta,
+        uint256 durCapMin,
+        uint256 durPlantMin
+    ) internal pure {
+        require(
+            bytes(titulo).length > 0 && bytes(titulo).length <= MAX_TEXTO,
+            "Titulo invalido"
+        ); // [Recurso: EstruturasDeControle]
+        require(
+            bytes(local).length > 0 && bytes(local).length <= MAX_TEXTO,
+            "Local invalido"
+        );
+        require(mudas > 0, "Quantidade de mudas invalida");
+        require(meta > 0, "Meta deve ser maior que zero");
+        require(durCapMin > 0 && durCapMin <= MAX_DURACAO_MIN, "Duracao de captacao invalida");
+        require(durPlantMin > 0 && durPlantMin <= MAX_DURACAO_MIN, "Duracao de plantio invalida");
+    }
+
+    /// @dev Conta os projetos da comunidade em Captando, Financiado ou Plantado.
+    // [Recurso: Funcoes]
+    function _contarProjetosAtivos(address conta) internal view returns (uint256 ativos) {
+        uint256[] storage ids = comunidades[conta].projetos;
+        for (uint256 i = 0; i < ids.length; i++) { // [Recurso: EstruturasDeControle]
+            Status s = projetos[ids[i]].status;
+            if (s == Status.Captando || s == Status.Financiado || s == Status.Plantado) {
+                ativos++;
+            }
+        }
+    }
 }

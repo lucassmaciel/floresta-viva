@@ -10,6 +10,23 @@ async function implantar() {
   return { contrato, dono, comunidade, apoiador, apoiador2, outro };
 }
 
+// Cria um projeto com valores padrão; `ov` sobrescreve qualquer campo.
+// Devolve a transação (use `await` para esperar a mineração).
+async function criarProjetoPadrao(contrato, comunidade, ov = {}) {
+  const p = {
+    titulo: "Castanheiras de Manacapuru",
+    local: "Manacapuru - AM",
+    mudas: 500,
+    meta: ethers.parseEther("1"),
+    durCap: 30,
+    durPlantio: 60,
+    ...ov,
+  };
+  return contrato
+    .connect(comunidade)
+    .criarProjeto(p.titulo, p.local, p.mudas, p.meta, p.durCap, p.durPlantio);
+}
+
 describe("Comunidades", function () {
   it("constructor define dono e prazo de verificação", async function () {
     const { contrato, dono } = await implantar();
@@ -77,3 +94,77 @@ describe("Comunidades", function () {
     expect(await contrato.projetosDaComunidade(comunidade.address)).to.deep.equal([]);
   });
 });
+
+describe("Projetos", function () {
+  async function comComunidade() {
+    const ctx = await implantar();
+    await ctx.contrato.cadastrarComunidade(ctx.comunidade.address, "Viveiro Manacapuru");
+    return ctx;
+  }
+
+  it("cria projeto", async function () {
+    const { contrato, comunidade } = await comComunidade();
+    const tx = await criarProjetoPadrao(contrato, comunidade);
+    const bloco = await ethers.provider.getBlock(tx.blockNumber);
+    const prazo = BigInt(bloco.timestamp) + 30n * 60n;
+    await expect(tx)
+      .to.emit(contrato, "ProjetoCriado")
+      .withArgs(0, comunidade.address, "Castanheiras de Manacapuru", ethers.parseEther("1"), prazo);
+    const p = await contrato.obterProjeto(0);
+    expect(p.status).to.equal(0n);
+    expect(p.prazoCaptacao).to.equal(prazo);
+    expect(p.duracaoPlantio).to.equal(3600n);
+    expect(await contrato.projetosDaComunidade(comunidade.address)).to.deep.equal([0n]);
+    expect(await contrato.totalProjetos()).to.equal(1n);
+  });
+
+  it("só comunidade ativa cria", async function () {
+    const { contrato, comunidade, apoiador } = await comComunidade();
+    await expect(criarProjetoPadrao(contrato, apoiador))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
+      .withArgs(apoiador.address);
+    await contrato.desativarComunidade(comunidade.address);
+    await expect(criarProjetoPadrao(contrato, comunidade))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
+      .withArgs(comunidade.address);
+  });
+
+  it("valida dados", async function () {
+    const { contrato, comunidade } = await comComunidade();
+    await expect(criarProjetoPadrao(contrato, comunidade, { titulo: "" }))
+      .to.be.revertedWith("Titulo invalido");
+    await expect(criarProjetoPadrao(contrato, comunidade, { titulo: "a".repeat(81) }))
+      .to.be.revertedWith("Titulo invalido");
+    await expect(criarProjetoPadrao(contrato, comunidade, { local: "" }))
+      .to.be.revertedWith("Local invalido");
+    await expect(criarProjetoPadrao(contrato, comunidade, { meta: 0 }))
+      .to.be.revertedWith("Meta deve ser maior que zero");
+    await expect(criarProjetoPadrao(contrato, comunidade, { mudas: 0 }))
+      .to.be.revertedWith("Quantidade de mudas invalida");
+    await expect(criarProjetoPadrao(contrato, comunidade, { durCap: 0 }))
+      .to.be.revertedWith("Duracao de captacao invalida");
+    await expect(criarProjetoPadrao(contrato, comunidade, { durCap: 525601 }))
+      .to.be.revertedWith("Duracao de captacao invalida");
+    await expect(criarProjetoPadrao(contrato, comunidade, { durPlantio: 0 }))
+      .to.be.revertedWith("Duracao de plantio invalida");
+    await expect(criarProjetoPadrao(contrato, comunidade, { durPlantio: 525601 }))
+      .to.be.revertedWith("Duracao de plantio invalida");
+  });
+
+  it("limite de ativos", async function () {
+    const { contrato, comunidade } = await comComunidade();
+    for (let i = 0; i < 3; i++) await criarProjetoPadrao(contrato, comunidade);
+    await expect(criarProjetoPadrao(contrato, comunidade))
+      .to.be.revertedWithCustomError(contrato, "LimiteDeProjetosAtingido")
+      .withArgs(3);
+  });
+
+  it("obterProjeto inexistente", async function () {
+    const { contrato } = await comComunidade();
+    await expect(contrato.obterProjeto(99))
+      .to.be.revertedWithCustomError(contrato, "ProjetoInexistente")
+      .withArgs(99);
+  });
+});
+
+module.exports = { implantar, criarProjetoPadrao };
