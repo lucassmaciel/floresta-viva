@@ -1,7 +1,7 @@
 // Gerado por scripts/exportar-abi.js. Preencha endereco e blocoDeploy apos o deploy.
 const CONTRATO = {
-  endereco: "0x0000000000000000000000000000000000000000",
-  blocoDeploy: 0,
+  endereco: "0x492e97B6C7f47113cb0A294149717f9E16c76E7B",
+  blocoDeploy: 12141726,
   abi: [
     {
       "inputs": [
