@@ -438,6 +438,134 @@ contract FlorestaViva {
         _transferir(payable(msg.sender), valor);
     }
 
+    // ------------------------------------------------------------------
+    // Plantio, verificacao, cancelamento e prazos
+    // ------------------------------------------------------------------
+
+    /// @notice A comunidade registra a prova do plantio (hash do arquivo) de um projeto Financiado.
+    /// @dev Aberto enquanto agora < prazoPlantio. Inicia o prazo de verificacao do dono.
+    /// @param id Id do projeto.
+    /// @param prova keccak256 do arquivo de prova (nao pode ser zero).
+    // [Recurso: Funcoes]
+    function registrarPlantio(uint256 id, bytes32 prova)
+        external
+        projetoExiste(id) // [Recurso: Modificadores]
+        apenasComunidadeDoProjeto(id) // [Recurso: Modificadores]
+        noEstado(id, Status.Financiado) // [Recurso: Modificadores]
+    {
+        Projeto storage p = projetos[id];
+
+        require(prova != bytes32(0), "Prova invalida"); // [Recurso: EstruturasDeControle]
+        if (block.timestamp >= p.prazoPlantio) {
+            revert PrazoEncerrado(p.prazoPlantio); // [Recurso: EventosEErros]
+        }
+
+        p.provaPlantio = prova;
+        p.prazoVerificacao = block.timestamp + prazoVerificacaoSeg;
+        p.status = Status.Plantado;
+
+        emit PlantioRegistrado(id, prova); // [Recurso: EventosEErros]
+    }
+
+    /// @notice O dono aprova o plantio: libera o restante do valor e sobe a reputacao em 1.
+    /// @dev Aberto enquanto agora < prazoVerificacao.
+    /// @param id Id do projeto.
+    // [Recurso: Funcoes]
+    function verificarPlantio(uint256 id)
+        external
+        apenasDono // [Recurso: Modificadores]
+        projetoExiste(id) // [Recurso: Modificadores]
+        noEstado(id, Status.Plantado) // [Recurso: Modificadores]
+    {
+        Projeto storage p = projetos[id];
+
+        if (block.timestamp >= p.prazoVerificacao) {
+            revert PrazoEncerrado(p.prazoVerificacao); // [Recurso: EventosEErros]
+        }
+
+        p.status = Status.Verificado;
+        comunidades[p.comunidade].reputacao += 1;
+
+        emit PlantioVerificado(id, msg.sender); // [Recurso: EventosEErros]
+    }
+
+    /// @notice O dono cancela um projeto: Captando (suspeita), Financiado (so depois de
+    ///         prazoPlantio) ou Plantado (prova rejeitada, antes de prazoVerificacao).
+    /// @dev Toda via do dono penaliza a comunidade em -1 de reputacao.
+    /// @param id Id do projeto.
+    /// @param motivo Texto livre explicando o cancelamento.
+    // [Recurso: Funcoes]
+    function cancelarProjeto(uint256 id, string calldata motivo)
+        external
+        apenasDono // [Recurso: Modificadores]
+        projetoExiste(id) // [Recurso: Modificadores]
+    {
+        Projeto storage p = projetos[id];
+
+        if (p.status == Status.Captando) {
+            // Suspeita: o dono pode cancelar a qualquer momento.
+            _cancelar(p, motivo, true);
+        } else if (p.status == Status.Financiado) {
+            // Protege a comunidade: so depois de vencido o prazo de plantio.
+            if (block.timestamp < p.prazoPlantio) {
+                revert PrazoNaoEncerrado(block.timestamp, p.prazoPlantio); // [Recurso: EventosEErros]
+            }
+            _cancelar(p, motivo, true);
+        } else if (p.status == Status.Plantado) {
+            // Prova rejeitada: so enquanto o prazo de verificacao esta aberto.
+            if (block.timestamp >= p.prazoVerificacao) {
+                revert PrazoEncerrado(p.prazoVerificacao); // [Recurso: EventosEErros]
+            }
+            _cancelar(p, motivo, true);
+        } else {
+            // Verificado ou Cancelado: estados finais.
+            revert EstadoInvalido(id, p.status, Status.Plantado); // [Recurso: EventosEErros]
+        } // [Recurso: EstruturasDeControle]
+    }
+
+    /// @notice Qualquer pessoa cancela um projeto cujo prazo da etapa atual venceu.
+    /// @dev Captando (meta nao atingida) e Plantado (verificador omisso) nao penalizam;
+    ///      Financiado (plantio nao registrado) penaliza em -1.
+    /// @param id Id do projeto.
+    // [Recurso: Funcoes]
+    function encerrarPorPrazo(uint256 id)
+        external
+        projetoExiste(id) // [Recurso: Modificadores]
+    {
+        Projeto storage p = projetos[id];
+
+        if (p.status == Status.Captando) {
+            if (block.timestamp < p.prazoCaptacao) {
+                revert PrazoNaoEncerrado(block.timestamp, p.prazoCaptacao); // [Recurso: EventosEErros]
+            }
+            _cancelar(p, "Meta nao atingida no prazo", false);
+        } else if (p.status == Status.Financiado) {
+            if (block.timestamp < p.prazoPlantio) {
+                revert PrazoNaoEncerrado(block.timestamp, p.prazoPlantio); // [Recurso: EventosEErros]
+            }
+            _cancelar(p, "Plantio nao registrado no prazo", true);
+        } else if (p.status == Status.Plantado) {
+            if (block.timestamp < p.prazoVerificacao) {
+                revert PrazoNaoEncerrado(block.timestamp, p.prazoVerificacao); // [Recurso: EventosEErros]
+            }
+            _cancelar(p, "Verificacao nao realizada no prazo", false);
+        } else {
+            revert EstadoInvalido(id, p.status, Status.Plantado); // [Recurso: EventosEErros]
+        } // [Recurso: EstruturasDeControle]
+    }
+
+    /// @dev Cancela o projeto: grava o saldo reembolsavel (arrecadado - sacado), muda o status
+    ///      e, se `penalizar`, tira 1 ponto de reputacao da comunidade.
+    // [Recurso: Funcoes]
+    function _cancelar(Projeto storage p, string memory motivo, bool penalizar) internal {
+        p.saldoReembolsavel = p.arrecadado - p.sacado;
+        p.status = Status.Cancelado;
+        if (penalizar) {
+            comunidades[p.comunidade].reputacao -= 1;
+        } // [Recurso: EstruturasDeControle]
+        emit ProjetoCancelado(p.id, motivo, p.saldoReembolsavel); // [Recurso: EventosEErros]
+    }
+
     /// @dev Envia ETH com call{value:} e reverte se a transferencia falhar.
     // [Recurso: Funcoes]
     function _transferir(address payable para, uint256 valor) private {

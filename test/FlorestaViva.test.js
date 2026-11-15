@@ -312,4 +312,332 @@ describe("Apoio e saque", function () {
   });
 });
 
+describe("Ciclo do plantio", function () {
+  const eth = (v) => ethers.parseEther(v);
+  const prova = ethers.id("foto-plantio.jpg");
+  const MOTIVO_META = "Meta nao atingida no prazo";
+  const MOTIVO_PLANTIO = "Plantio nao registrado no prazo";
+  const MOTIVO_VERIF = "Verificacao nao realizada no prazo";
+
+  // Projeto 0 em Captando.
+  async function captando() {
+    const ctx = await implantar();
+    await ctx.contrato.cadastrarComunidade(ctx.comunidade.address, "Viveiro Manacapuru");
+    await criarProjetoPadrao(ctx.contrato, ctx.comunidade);
+    return ctx;
+  }
+  // Projeto 0 em Financiado (1 ETH arrecadado).
+  async function financiado() {
+    const ctx = await captando();
+    await financiar(ctx.contrato, 0, [ctx.apoiador, ctx.apoiador2]);
+    return ctx;
+  }
+  // Projeto 0 em Plantado.
+  async function plantado() {
+    const ctx = await financiado();
+    await ctx.contrato.connect(ctx.comunidade).registrarPlantio(0, prova);
+    return ctx;
+  }
+  const prazoPlantioDe = async (c) => Number((await c.obterProjeto(0)).prazoPlantio);
+  const prazoVerifDe = async (c) => Number((await c.obterProjeto(0)).prazoVerificacao);
+  const reputacao = async (c, conta) => (await c.comunidades(conta.address)).reputacao;
+
+  it("registra plantio", async function () {
+    const { contrato, comunidade } = await financiado();
+    const tx = await contrato.connect(comunidade).registrarPlantio(0, prova);
+    const bloco = await ethers.provider.getBlock(tx.blockNumber);
+    await expect(tx).to.emit(contrato, "PlantioRegistrado").withArgs(0, prova);
+    const p = await contrato.obterProjeto(0);
+    expect(p.status).to.equal(2n);
+    expect(p.provaPlantio).to.equal(prova);
+    expect(p.prazoVerificacao).to.equal(BigInt(bloco.timestamp) + 600n);
+  });
+
+  it("registrar: prova zero, após o prazo e por não-comunidade", async function () {
+    const { contrato, comunidade, apoiador } = await financiado();
+    await expect(contrato.connect(comunidade).registrarPlantio(0, ethers.ZeroHash)).to.be.reverted;
+    await expect(contrato.connect(apoiador).registrarPlantio(0, prova))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
+      .withArgs(apoiador.address);
+    await expect(contrato.connect(comunidade).registrarPlantio(9, prova))
+      .to.be.revertedWithCustomError(contrato, "ProjetoInexistente")
+      .withArgs(9);
+    const prazo = await prazoPlantioDe(contrato);
+    await time.increase(61 * 60);
+    await expect(contrato.connect(comunidade).registrarPlantio(0, prova))
+      .to.be.revertedWithCustomError(contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+  });
+
+  it("registrar fora de Financiado reverte com EstadoInvalido", async function () {
+    const { contrato, comunidade } = await captando();
+    await expect(contrato.connect(comunidade).registrarPlantio(0, prova))
+      .to.be.revertedWithCustomError(contrato, "EstadoInvalido")
+      .withArgs(0, 0, 1);
+  });
+
+  it("verifica e libera o restante (já sacou a 1ª parcela)", async function () {
+    const { contrato, dono, comunidade } = await plantado();
+    await contrato.connect(comunidade).sacar(0);
+    await expect(contrato.connect(dono).verificarPlantio(0))
+      .to.emit(contrato, "PlantioVerificado")
+      .withArgs(0, dono.address);
+    expect((await contrato.obterProjeto(0)).status).to.equal(3n);
+    expect(await reputacao(contrato, comunidade)).to.equal(1n);
+    expect(await contrato.disponivelParaSaque(0)).to.equal(eth("0.5"));
+    await contrato.connect(comunidade).sacar(0);
+    expect(await ethers.provider.getBalance(await contrato.getAddress())).to.equal(0n);
+  });
+
+  it("verifica e libera tudo (não sacou antes)", async function () {
+    const { contrato, dono, comunidade } = await plantado();
+    await contrato.connect(dono).verificarPlantio(0);
+    expect(await contrato.disponivelParaSaque(0)).to.equal(eth("1"));
+    await expect(contrato.connect(comunidade).sacar(0)).to.changeEtherBalances(
+      [contrato, comunidade],
+      [-eth("1"), eth("1")]
+    );
+    expect(await ethers.provider.getBalance(await contrato.getAddress())).to.equal(0n);
+  });
+
+  it("só o dono verifica, e só em Plantado", async function () {
+    const { contrato, comunidade } = await plantado();
+    await expect(contrato.connect(comunidade).verificarPlantio(0))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
+      .withArgs(comunidade.address);
+    const c2 = await financiado();
+    await expect(c2.contrato.connect(c2.dono).verificarPlantio(0))
+      .to.be.revertedWithCustomError(c2.contrato, "EstadoInvalido")
+      .withArgs(0, 1, 2);
+  });
+
+  it("verificar após prazoVerificacao reverte", async function () {
+    const { contrato, dono } = await plantado();
+    const prazo = await prazoVerifDe(contrato);
+    await time.increase(11 * 60);
+    await expect(contrato.connect(dono).verificarPlantio(0))
+      .to.be.revertedWithCustomError(contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+  });
+
+  it("dono cancela em Captando (penalidade) com saldo reembolsável", async function () {
+    const { contrato, dono, comunidade, apoiador } = await captando();
+    await contrato.connect(apoiador).apoiar(0, { value: eth("0.3") });
+    await expect(contrato.connect(dono).cancelarProjeto(0, "suspeita"))
+      .to.emit(contrato, "ProjetoCancelado")
+      .withArgs(0, "suspeita", eth("0.3"));
+    const p = await contrato.obterProjeto(0);
+    expect(p.status).to.equal(4n);
+    expect(p.saldoReembolsavel).to.equal(eth("0.3"));
+    expect(await reputacao(contrato, comunidade)).to.equal(-1n);
+  });
+
+  it("dono cancela em Plantado antes do prazo (penalidade)", async function () {
+    const { contrato, dono, comunidade } = await plantado();
+    await contrato.connect(comunidade).sacar(0);
+    await contrato.connect(dono).cancelarProjeto(0, "prova rejeitada");
+    const p = await contrato.obterProjeto(0);
+    expect(p.status).to.equal(4n);
+    expect(p.saldoReembolsavel).to.equal(eth("0.5")); // arrecadado - sacado
+    expect(await reputacao(contrato, comunidade)).to.equal(-1n);
+  });
+
+  it("dono em Plantado após prazoVerificacao: PrazoEncerrado", async function () {
+    const { contrato, dono } = await plantado();
+    const prazo = await prazoVerifDe(contrato);
+    await time.increase(11 * 60);
+    await expect(contrato.connect(dono).cancelarProjeto(0, "x"))
+      .to.be.revertedWithCustomError(contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+  });
+
+  it("só o dono cancela e o projeto precisa existir", async function () {
+    const { contrato, comunidade, outro } = await captando();
+    await expect(contrato.connect(outro).cancelarProjeto(0, "x"))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
+      .withArgs(outro.address);
+    await expect(contrato.connect(comunidade).cancelarProjeto(0, "x"))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado");
+    await expect(contrato.encerrarPorPrazo(9))
+      .to.be.revertedWithCustomError(contrato, "ProjetoInexistente")
+      .withArgs(9);
+  });
+
+  it("fronteira registrarPlantio: prazo-1 abre, prazo reverte e encerra", async function () {
+    let c = await financiado();
+    let prazo = await prazoPlantioDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(c.contrato.connect(c.comunidade).registrarPlantio(0, prova))
+      .to.emit(c.contrato, "PlantioRegistrado");
+
+    c = await financiado();
+    prazo = await prazoPlantioDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(c.contrato.connect(c.outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(c.contrato, "PrazoNaoEncerrado")
+      .withArgs(prazo - 1, prazo);
+
+    c = await financiado();
+    prazo = await prazoPlantioDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo);
+    await expect(c.contrato.connect(c.comunidade).registrarPlantio(0, prova))
+      .to.be.revertedWithCustomError(c.contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+
+    c = await financiado();
+    prazo = await prazoPlantioDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo);
+    await expect(c.contrato.connect(c.outro).encerrarPorPrazo(0))
+      .to.emit(c.contrato, "ProjetoCancelado");
+  });
+
+  it("fronteira verificarPlantio: prazo-1 abre, prazo reverte e encerra", async function () {
+    let c = await plantado();
+    let prazo = await prazoVerifDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(c.contrato.connect(c.dono).verificarPlantio(0))
+      .to.emit(c.contrato, "PlantioVerificado");
+
+    c = await plantado();
+    prazo = await prazoVerifDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(c.contrato.connect(c.outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(c.contrato, "PrazoNaoEncerrado")
+      .withArgs(prazo - 1, prazo);
+
+    c = await plantado();
+    prazo = await prazoVerifDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo);
+    await expect(c.contrato.connect(c.dono).verificarPlantio(0))
+      .to.be.revertedWithCustomError(c.contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+
+    c = await plantado();
+    prazo = await prazoVerifDe(c.contrato);
+    await time.setNextBlockTimestamp(prazo);
+    await expect(c.contrato.connect(c.outro).encerrarPorPrazo(0))
+      .to.emit(c.contrato, "ProjetoCancelado");
+  });
+
+  it("dono não cancela Financiado antes de prazoPlantio; depois sim (-1)", async function () {
+    const { contrato, dono, comunidade } = await financiado();
+    const prazo = await prazoPlantioDe(contrato);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(contrato.connect(dono).cancelarProjeto(0, "x"))
+      .to.be.revertedWithCustomError(contrato, "PrazoNaoEncerrado")
+      .withArgs(prazo - 1, prazo);
+    await time.setNextBlockTimestamp(prazo);
+    await expect(contrato.connect(dono).cancelarProjeto(0, "sem plantio"))
+      .to.emit(contrato, "ProjetoCancelado");
+    expect(await reputacao(contrato, comunidade)).to.equal(-1n);
+  });
+
+  it("dono não cancela Verificado nem Cancelado", async function () {
+    const { contrato, dono } = await plantado();
+    await contrato.connect(dono).verificarPlantio(0);
+    await expect(contrato.connect(dono).cancelarProjeto(0, "x"))
+      .to.be.revertedWithCustomError(contrato, "EstadoInvalido")
+      .withArgs(0, 3, 2);
+
+    const c = await captando();
+    await c.contrato.connect(c.dono).cancelarProjeto(0, "x");
+    await expect(c.contrato.connect(c.dono).cancelarProjeto(0, "y"))
+      .to.be.revertedWithCustomError(c.contrato, "EstadoInvalido")
+      .withArgs(0, 4, 2);
+  });
+
+  it("encerrarPorPrazo em Captando: motivo 1, sem penalidade", async function () {
+    const { contrato, comunidade, apoiador, outro } = await captando();
+    await contrato.connect(apoiador).apoiar(0, { value: eth("0.2") });
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(contrato, "PrazoNaoEncerrado");
+    await time.increase(31 * 60);
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.emit(contrato, "ProjetoCancelado")
+      .withArgs(0, MOTIVO_META, eth("0.2"));
+    expect((await contrato.obterProjeto(0)).status).to.equal(4n);
+    expect(await reputacao(contrato, comunidade)).to.equal(0n);
+  });
+
+  it("encerrarPorPrazo em Financiado: motivo 2, penalidade -1", async function () {
+    const { contrato, comunidade, outro } = await financiado();
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(contrato, "PrazoNaoEncerrado");
+    await time.increase(61 * 60);
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.emit(contrato, "ProjetoCancelado")
+      .withArgs(0, MOTIVO_PLANTIO, eth("1"));
+    expect(await reputacao(contrato, comunidade)).to.equal(-1n);
+  });
+
+  it("encerrarPorPrazo em Plantado: motivo 3, sem penalidade, mantém 1ª parcela", async function () {
+    const { contrato, comunidade, outro } = await plantado();
+    await contrato.connect(comunidade).sacar(0);
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(contrato, "PrazoNaoEncerrado");
+    await time.increase(11 * 60);
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.emit(contrato, "ProjetoCancelado")
+      .withArgs(0, MOTIVO_VERIF, eth("0.5"));
+    expect(await reputacao(contrato, comunidade)).to.equal(0n);
+  });
+
+  it("encerrarPorPrazo em Verificado e Cancelado: EstadoInvalido", async function () {
+    const { contrato, dono, outro } = await plantado();
+    await contrato.connect(dono).verificarPlantio(0);
+    await expect(contrato.connect(outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(contrato, "EstadoInvalido")
+      .withArgs(0, 3, 2);
+    const c = await captando();
+    await c.contrato.connect(c.dono).cancelarProjeto(0, "x");
+    await expect(c.contrato.connect(c.outro).encerrarPorPrazo(0))
+      .to.be.revertedWithCustomError(c.contrato, "EstadoInvalido")
+      .withArgs(0, 4, 2);
+  });
+
+  it("reputação baixa bloqueia novos projetos e persiste após reativar", async function () {
+    const { contrato, dono, comunidade } = await captando();
+    await contrato.connect(dono).cancelarProjeto(0, "x");
+    for (let i = 1; i <= 2; i++) {
+      await criarProjetoPadrao(contrato, comunidade);
+      await contrato.connect(dono).cancelarProjeto(i, "x");
+    }
+    expect(await reputacao(contrato, comunidade)).to.equal(-3n);
+    await expect(criarProjetoPadrao(contrato, comunidade))
+      .to.be.revertedWithCustomError(contrato, "ReputacaoInsuficiente")
+      .withArgs(-3);
+    await contrato.desativarComunidade(comunidade.address);
+    await contrato.cadastrarComunidade(comunidade.address, "Viveiro Manacapuru");
+    expect(await reputacao(contrato, comunidade)).to.equal(-3n);
+    await expect(criarProjetoPadrao(contrato, comunidade))
+      .to.be.revertedWithCustomError(contrato, "ReputacaoInsuficiente")
+      .withArgs(-3);
+  });
+
+  it("limite de 20 projetos por comunidade", async function () {
+    const { contrato, outro, comunidade } = await captando();
+    for (let i = 0; i < 20; i++) {
+      if (i > 0) await criarProjetoPadrao(contrato, comunidade);
+      await time.increase(31 * 60);
+      await contrato.connect(outro).encerrarPorPrazo(i); // sem penalidade
+    }
+    expect(await reputacao(contrato, comunidade)).to.equal(0n);
+    await expect(criarProjetoPadrao(contrato, comunidade))
+      .to.be.revertedWithCustomError(contrato, "LimiteDeProjetosAtingido")
+      .withArgs(20);
+  });
+
+  it("projetos cancelados deixam de contar no limite de ativos", async function () {
+    const { contrato, outro, comunidade } = await captando();
+    await criarProjetoPadrao(contrato, comunidade);
+    await criarProjetoPadrao(contrato, comunidade);
+    await expect(criarProjetoPadrao(contrato, comunidade))
+      .to.be.revertedWithCustomError(contrato, "LimiteDeProjetosAtingido")
+      .withArgs(3);
+    await time.increase(31 * 60);
+    await contrato.connect(outro).encerrarPorPrazo(0);
+    await expect(criarProjetoPadrao(contrato, comunidade)).to.emit(contrato, "ProjetoCriado");
+  });
+});
+
 module.exports = { implantar, criarProjetoPadrao, financiar };
