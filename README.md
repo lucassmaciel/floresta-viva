@@ -19,10 +19,9 @@ Papéis sugeridos pelo guia do trabalho, usados para organizar o trabalho. Todos
 
 | Integrante | Papel |
 |---|---|
-| <!-- PREENCHER: nome 1 --> | Desenvolvedor(a) do contrato |
-| <!-- PREENCHER: nome 2 --> | Desenvolvedor(a) frontend |
-| <!-- PREENCHER: nome 3 --> | Integração Web3 |
-| <!-- PREENCHER: nome 4 --> | Documentação e QA |
+| Lucas Maciel Gomes ([@lucassmaciel](https://github.com/lucassmaciel)) | Desenvolvedor do contrato |
+| Izabella de Lima Catrinck ([@izabellacatrinck](https://github.com/izabellacatrinck)) | Desenvolvedora frontend |
+| Caio Jorge ([@cjcaio](https://github.com/cjcaio)) | Integração Web3, Documentação e QA |
 
 ## 3. Dados do deploy (Sepolia, Chain ID 11155111)
 
