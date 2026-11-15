@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Floresta Viva</title>
+  <meta name="description" content="Financiamento coletivo de reflorestamento na Amazônia, com transparência na blockchain.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="cabecalho">
+    <h1 class="marca">🌳 Floresta Viva</h1>
+    <div class="cabecalho-carteira">
+      <span id="selo-rede" class="selo selo-neutro">Sem rede</span>
+      <span id="conta" class="conta"></span>
+      <span id="saldo" class="saldo"></span>
+      <button id="btn-conectar" type="button" class="btn">Conectar carteira</button>
+    </div>
+  </header>
+
+  <div id="aviso-rede" class="aviso aviso-rede" hidden>
+    <span id="aviso-rede-texto">Você está na rede errada.</span>
+    <button id="btn-trocar-rede" type="button" class="btn btn-secundario">Trocar para Sepolia</button>
+  </div>
+
+  <div id="aviso-geral" class="aviso aviso-geral" role="status" aria-live="polite" hidden></div>
+
+  <main>
+    <section id="totais" class="totais" aria-label="Totais"></section>
+
+    <section class="secao">
+      <h2>Projetos</h2>
+      <div id="lista-projetos" class="grade-projetos">
+        <p class="vazio">Carregando projetos…</p>
+      </div>
+    </section>
+
+    <section id="painel-comunidade" class="secao painel" hidden>
+      <h2>Minha comunidade</h2>
+    </section>
+
+    <section id="meus-apoios" class="secao painel" hidden>
+      <h2>Meus apoios</h2>
+    </section>
+
+    <section id="painel-dono" class="secao painel" hidden>
+      <h2>Painel do verificador</h2>
+    </section>
+
+    <section class="secao">
+      <h2>Histórico de eventos</h2>
+      <ul id="historico" class="lista-simples"></ul>
+    </section>
+
+    <section class="secao">
+      <h2>Transações</h2>
+      <ul id="transacoes" class="lista-simples"></ul>
+    </section>
+  </main>
+
+  <footer class="rodape">
+    Floresta Viva · rede de teste Sepolia · nenhum valor real é movimentado
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/web3@4.16.0/dist/web3.min.js"></script>
+  <script src="contrato.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
