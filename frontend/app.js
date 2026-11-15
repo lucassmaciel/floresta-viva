@@ -107,6 +107,30 @@ function mostrarAviso(texto, tipo = "info") {
   caixa.hidden = false;
 }
 
+// Link de download da MetaMask, usado nas mensagens de "carteira não instalada".
+const URL_METAMASK = "https://metamask.io/download/";
+
+// Monta "texto + link da MetaMask" sem innerHTML (textContent + <a>), então é seguro por construção.
+function criarMensagemInstalar(texto) {
+  const frag = document.createDocumentFragment();
+  frag.append(texto + " ");
+  const a = document.createElement("a");
+  a.href = URL_METAMASK;
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.textContent = "Baixar a MetaMask ↗";
+  frag.append(a);
+  return frag;
+}
+
+// Faixa de aviso (erro) pedindo para instalar a MetaMask, com o link.
+function mostrarAvisoInstalar() {
+  const caixa = $("aviso-geral");
+  caixa.className = "aviso aviso-geral erro";
+  caixa.replaceChildren(criarMensagemInstalar("Instale a MetaMask para usar o Floresta Viva."));
+  caixa.hidden = false;
+}
+
 const contratoConfigurado = () =>
   CONTRATO.endereco && CONTRATO.endereco.toLowerCase() !== ENDERECO_ZERO;
 
@@ -120,7 +144,7 @@ const MSG_PEDIDO_PENDENTE = "Já existe um pedido pendente: abra a MetaMask.";
 // Pede acesso às contas (abre a MetaMask). Chamada pelo botão "Conectar carteira".
 async function conectarCarteira() {
   if (!window.ethereum) {
-    mostrarAviso("Instale a MetaMask para usar o Floresta Viva.", "erro");
+    mostrarAvisoInstalar();
     return;
   }
   try {
@@ -387,7 +411,8 @@ function acoesDoProjeto(p) {
     if (sou) {
       partes.push(
         `<label data-ate="${p.prazoPlantio}">Prova do plantio (foto/laudo) ` +
-        `<input type="file" data-acao="registrar-plantio" data-id="${p.id}"></label>`
+        `<input type="file" data-acao="registrar-plantio" data-id="${p.id}"></label>` +
+        `<small class="vazio" data-ate="${p.prazoPlantio}">O arquivo não sai do seu computador: só o hash keccak256 vai para a blockchain. Qualquer pessoa pode recalcular o hash do mesmo arquivo para conferir.</small>`
       );
     }
     partes.push(btnEncerrar);
@@ -427,7 +452,13 @@ function htmlCard(p) {
 function renderizarProjetos() {
   const lista = $("lista-projetos");
   const msg = mensagemVazia();
-  if (msg) {
+  if (contratoConfigurado() && !estado.web3) {
+    // Sem carteira: mensagem com link para instalar a MetaMask.
+    const p = document.createElement("p");
+    p.className = "vazio";
+    p.append(criarMensagemInstalar("Instale a MetaMask para ver os projetos."));
+    lista.replaceChildren(p);
+  } else if (msg) {
     lista.innerHTML = `<p class="vazio">${msg}</p>`;
   } else if (!estado.projetos.length) {
     lista.innerHTML = '<p class="vazio">Nenhum projeto ainda.</p>';
@@ -591,7 +622,8 @@ async function atualizarTudo() {
     estado.projetos = [];
     renderizarCabecalho(false, false);
     renderizarPaineis();
-    mostrarAviso("Instale a MetaMask para usar o Floresta Viva.", "erro");
+    mostrarAvisoInstalar();
+    $("historico").innerHTML = '<li class="vazio">Instale a MetaMask para ver o histórico.</li>';
     return;
   }
 
@@ -618,12 +650,14 @@ async function atualizarTudo() {
       estado.projetos = [];
       estado.totalApoiado = 0n;
     }
-    // Uma leitura bem-sucedida apaga o aviso de erro antigo (inclusive em rede errada).
+    // Uma leitura bem-sucedida apaga SÓ o aviso de erro de leitura antigo (inclusive em rede errada).
+    // Resultados e erros de transação ficam na tela até a próxima ação do usuário,
+    // mesmo com a atualização automática de 15 s rodando.
     if ($("aviso-geral").textContent === MSG_ERRO_LEITURA) mostrarAviso("");
     if (!contratoConfigurado()) {
       mostrarAviso("Contrato não configurado: publique o contrato e preencha o endereço em contrato.js.", "erro");
     } else if (naSepolia) {
-      mostrarAviso("");
+      // (Não limpa a faixa aqui: ela também guarda o resultado da última transação.)
       await carregarPapel();
       if (obsoleta()) return;
       await carregarProjetos();
@@ -731,6 +765,7 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
   let sucesso = false;
   let mensagemErro = null;
   let linha = null; // <li> da transação (só existe depois que a carteira assina)
+  let hashTx = null; // hash da transação, assim que ela é enviada (para o link do Etherscan)
   try {
     const opcoes = { from: estado.conta };
 
@@ -751,6 +786,7 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
     //    a transação é assinada e enviada (ainda não confirmada).
     mostrarAviso(`Confirme na MetaMask: ${descricao}`);
     const recibo = await metodo.send(opcoes).on("transactionHash", (hash) => {
+      hashTx = hash;
       linha = document.createElement("li");
       escreverLinhaTx(linha, "⏳", `${descricao} — pendente`, hash);
       $("transacoes").prepend(linha);
@@ -758,19 +794,31 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
     });
 
     // O recibo diz se a execução deu certo (status 1) ou reverteu (status 0).
+    // (No Web3.js v4 um revert minerado normalmente cai no catch; este ramo é só garantia.)
     sucesso = Number(recibo.status) === 1;
     if (linha) escreverLinhaTx(linha, sucesso ? "✅" : "❌", `${descricao} — ${sucesso ? "confirmada" : "falhou"}`, recibo.transactionHash);
     if (!sucesso) mensagemErro = "A transação foi enviada, mas falhou na blockchain.";
   } catch (e) {
     console.error(e);
-    mensagemErro = e instanceof ErroDeUsuario ? e.message : traduzirErro(e);
-    if (linha) escreverLinhaTx(linha, "❌", `${descricao} — falhou`);
+    if (e instanceof ErroDeUsuario) {
+      mensagemErro = e.message;
+    } else if (hashTx) {
+      // A transação já foi enviada: no Web3.js v4, se ela for minerada e reverter,
+      // o send() lança erro (em inglês) em vez de devolver status 0.
+      // Se o usuário já tinha hash, o problema aconteceu na blockchain (ou na espera).
+      mensagemErro = "A transação foi enviada, mas falhou na blockchain. Veja no Etherscan.";
+    } else {
+      mensagemErro = traduzirErro(e);
+    }
+    // A linha ❌ mantém o hash para o usuário abrir a transação no Etherscan.
+    if (linha) escreverLinhaTx(linha, "❌", `${descricao} — falhou`, hashTx);
   } finally {
     // 5. Libera os botões e relê a blockchain (atualizarTudo também recarrega o histórico).
     estado.txPendente = false;
     bloquearAcoes(false);
     await atualizarTudo();
-    // atualizarTudo limpa a faixa de avisos, então o resultado é mostrado por último.
+    // O resultado é mostrado por último e permanece até a próxima ação (a atualização
+    // automática não mexe nesta faixa).
     if (mensagemErro) mostrarAviso(mensagemErro, "erro");
     else if (sucesso) mostrarAviso(`${descricao}: confirmada.`, "sucesso");
   }
@@ -827,6 +875,25 @@ function identificarErroDoContrato(err) {
   return { nome: item.name, args: estado.web3.eth.abi.decodeParameters(item.inputs, "0x" + dados.slice(10)) };
 }
 
+// Mensagens dos require() do contrato (texto ASCII, sem acento) -> português claro.
+// Texto desconhecido continua aparecendo como veio.
+const MENSAGENS_REQUIRE = {
+  "Reentrada bloqueada": "Operação bloqueada: uma chamada anterior ainda está em andamento.",
+  "Endereco invalido": "Endereço inválido.",
+  "O dono nao pode ser comunidade": "O dono do contrato não pode ser cadastrado como comunidade.",
+  "Nome vazio": "Informe o nome da comunidade.",
+  "Nome muito longo": "Nome muito longo: use no máximo 80 bytes (acentos contam em dobro).",
+  "Comunidade nao cadastrada": "Comunidade não cadastrada.",
+  "Prova invalida": "Prova inválida: escolha um arquivo com conteúdo.",
+  "Quantidade de mudas invalida": "Quantidade de mudas inválida: informe um número maior que zero.",
+  "Meta deve ser maior que zero": "A meta deve ser maior que zero.",
+  "Duracao de captacao invalida": "Duração de captação inválida.",
+  "Duracao de plantio invalida": "Duração de plantio inválida.",
+};
+function traduzirRequire(texto) {
+  return MENSAGENS_REQUIRE[texto] || texto;
+}
+
 // Transforma qualquer erro (carteira, Web3.js, contrato) em uma frase em português.
 function traduzirErro(err) {
   // Usuário clicou em "Rejeitar" na MetaMask (código EIP-1193 4001).
@@ -858,14 +925,14 @@ function traduzirErro(err) {
       case "ReputacaoInsuficiente": return `Reputação da comunidade muito baixa (${a[0]}) para criar projetos.`;
       case "LimiteDeProjetosAtingido": return `Limite de ${a[0]} projetos atingido.`;
       case "TransferenciaFalhou": return "A transferência de ETH falhou.";
-      case "Error": return String(a[0]); // texto de um require
+      case "Error": return traduzirRequire(String(a[0])); // texto de um require
     }
   }
 
   if (/insufficient funds/i.test(mensagem)) return "Saldo insuficiente para valor + gas.";
   // Alguns nós só devolvem "execution reverted: texto" na mensagem.
   const revert = /execution reverted:?\s*([^|]+)/i.exec(mensagem);
-  if (revert && revert[1].trim()) return revert[1].trim();
+  if (revert && revert[1].trim()) return traduzirRequire(revert[1].trim());
 
   const curta = (textos[0] || "sem detalhes").slice(0, 120);
   return `Erro inesperado: ${curta}`;
@@ -885,6 +952,13 @@ const limparCampos = (prefixo) =>
 function lerEndereco(texto) {
   if (!estado.web3.utils.isAddress(texto)) throw new Error("Endereço inválido: informe um endereço 0x… com 42 caracteres.");
   return estado.web3.utils.toChecksumAddress(texto);
+}
+
+// O contrato limita título, local e nome a 80 BYTES (não caracteres): "ç" ou "ã" ocupam 2.
+function exigirAte80Bytes(texto) {
+  if (new TextEncoder().encode(texto).length > 80) {
+    throw new Error("Use no máximo 80 bytes (acentos contam em dobro).");
+  }
 }
 
 // Inteiro positivo digitado -> texto numérico, ou erro.
@@ -924,9 +998,9 @@ const ACOES = {
     await enviarTransacao(estado.contrato.methods.verificarPlantio(id), {}, `Verificar plantio do projeto #${id}`);
   },
   async rejeitar(id) {
-    const motivo = prompt("Motivo da rejeição da prova:", textoDe(`rej-${id}`) || "Prova rejeitada pelo verificador");
-    if (motivo === null) return; // clicou em Cancelar no prompt
-    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo.trim() || "Prova rejeitada pelo verificador"), {},
+    // Sem prompt() (não funciona em navegadores de celular): usa o campo ao lado do botão.
+    const motivo = textoDe(`rej-${id}`) || "Prova rejeitada pelo verificador";
+    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {},
       `Rejeitar prova do projeto #${id}`);
   },
   async cancelar(id) {
@@ -937,6 +1011,8 @@ const ACOES = {
     const titulo = textoDe("cp-titulo");
     const local = textoDe("cp-local");
     if (!titulo || !local) throw new Error("Preencha título e local.");
+    exigirAte80Bytes(titulo);
+    exigirAte80Bytes(local);
     const mudas = lerInteiro(textoDe("cp-mudas"), "Mudas");
     const meta = lerValorEth(textoDe("cp-meta"));
     const captacao = lerInteiro(textoDe("cp-captacao"), "Captação (min)");
@@ -950,6 +1026,7 @@ const ACOES = {
     const endereco = lerEndereco(textoDe("cc-endereco"));
     const nome = textoDe("cc-nome");
     if (!nome) throw new Error("Informe o nome da comunidade.");
+    exigirAte80Bytes(nome);
     const ok = await enviarTransacao(estado.contrato.methods.cadastrarComunidade(endereco, nome), {},
       `Cadastrar a comunidade “${nome}”`);
     if (ok) limparCampos("cc-");
@@ -1005,6 +1082,11 @@ function usuarioEditando() {
 }
 
 async function iniciar() {
+  // Se o CDN do Web3.js não carregou (sem internet/bloqueio), avisa em vez de ficar em "Carregando…".
+  if (typeof Web3 === "undefined") {
+    mostrarAviso("Falha ao carregar a biblioteca Web3.js. Verifique sua conexão e recarregue a página.", "erro");
+    return;
+  }
   ligarAcoes();
   $("btn-conectar").addEventListener("click", conectarCarteira);
   $("btn-trocar-rede").addEventListener("click", trocarParaSepolia);
