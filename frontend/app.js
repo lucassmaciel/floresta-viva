@@ -39,6 +39,7 @@ const estado = {
   totalApoiado: 0n,  // totalApoiadoPor(conta): soma bruta, nunca reduzida por reembolsos
   naSepolia: false,  // a carteira está na Sepolia?
   txPendente: false, // há uma transação aguardando confirmação?
+  filtro: "todos",   // etapa escolhida nos filtros da lista de projetos ("todos" ou número do status)
 };
 
 // Atalho para buscar elementos pelo id.
@@ -276,6 +277,15 @@ async function carregarProjetos() {
     };
   }));
 
+  // Nome de cada comunidade (uma leitura por endereço, não por projeto), para mostrar no card.
+  const enderecos = [...new Set(lista.map((p) => p.comunidade.toLowerCase()))];
+  const nomes = {};
+  await Promise.all(enderecos.map(async (end) => {
+    const c = await m.comunidades(end).call();
+    nomes[end] = c.nome;
+  }));
+  lista.forEach((p) => { p.nomeComunidade = nomes[p.comunidade.toLowerCase()] || ""; });
+
   estado.projetos = lista;
   // totalApoiadoPor é bruto: reembolsos NÃO o reduzem (por isso o rótulo "Total já apoiado").
   estado.totalApoiado = conta ? BigInt(await m.totalApoiadoPor(conta).call()) : 0n;
@@ -291,21 +301,21 @@ function frase(ev) {
     case "ComunidadeDesativada":
       return `${ator(v.conta)} foi desativada como comunidade`;
     case "ProjetoCriado":
-      return `${ator(v.comunidade)} criou o projeto #${v.id} “${esc(v.titulo)}” (meta ${formatarEth(BigInt(v.meta))} ETH)`;
+      return `${ator(v.comunidade)} criou o projeto nº ${v.id} “${esc(v.titulo)}” (meta ${formatarEth(BigInt(v.meta))} ETH)`;
     case "ApoioRecebido":
-      return `${ator(v.apoiador)} apoiou o projeto #${v.id} com ${formatarEth(BigInt(v.valor))} ETH`;
+      return `${ator(v.apoiador)} apoiou o projeto nº ${v.id} com ${formatarEth(BigInt(v.valor))} ETH`;
     case "ProjetoFinanciado":
-      return `O projeto #${v.id} atingiu a meta (${formatarEth(BigInt(v.arrecadado))} ETH) e foi financiado`;
+      return `O projeto nº ${v.id} atingiu a meta (${formatarEth(BigInt(v.arrecadado))} ETH) e foi financiado`;
     case "PlantioRegistrado":
-      return `Plantio registrado no projeto #${v.id} (prova ${esc(abreviar(v.prova))})`;
+      return `Plantio registrado no projeto nº ${v.id} (prova ${esc(abreviar(v.prova))})`;
     case "PlantioVerificado":
-      return `${ator(v.verificador)} verificou o plantio do projeto #${v.id}`;
+      return `${ator(v.verificador)} verificou o plantio do projeto nº ${v.id}`;
     case "ProjetoCancelado":
-      return `O projeto #${v.id} foi cancelado: “${esc(v.motivo)}” (${formatarEth(BigInt(v.saldoReembolsavel))} ETH reembolsáveis)`;
+      return `O projeto nº ${v.id} foi cancelado: “${esc(v.motivo)}” (${formatarEth(BigInt(v.saldoReembolsavel))} ETH reembolsáveis)`;
     case "SaqueRealizado":
-      return `${ator(v.comunidade)} sacou ${formatarEth(BigInt(v.valor))} ETH do projeto #${v.id}`;
+      return `${ator(v.comunidade)} sacou ${formatarEth(BigInt(v.valor))} ETH do projeto nº ${v.id}`;
     case "ReembolsoRealizado":
-      return `${ator(v.apoiador)} recebeu reembolso de ${formatarEth(BigInt(v.valor))} ETH do projeto #${v.id}`;
+      return `${ator(v.apoiador)} recebeu reembolso de ${formatarEth(BigInt(v.valor))} ETH do projeto nº ${v.id}`;
     default:
       return esc(ev.event || "Evento");
   }
@@ -326,15 +336,25 @@ async function carregarHistorico(versao = versaoAtualizacao) {
       Number(b.blockNumber) - Number(a.blockNumber) || Number(b.logIndex) - Number(a.logIndex));
     if (!eventos.length) {
       ul.innerHTML = '<li class="vazio">Nenhum evento ainda.</li>';
+      renderizarFaixaEventos([]);
       return;
     }
     ul.innerHTML = eventos.map((ev) =>
-      `<li>${frase(ev)} <a href="${linkTx(ev.transactionHash)}" target="_blank" rel="noopener">ver transação ↗</a></li>`
+      `<li>${frase(ev)}. <a href="${linkTx(ev.transactionHash)}" target="_blank" rel="noopener">Ver no Etherscan</a></li>`
     ).join("");
+    renderizarFaixaEventos(eventos);
   } catch (e) {
     console.error(e);
     if (versao === versaoAtualizacao) ul.innerHTML = '<li class="vazio">Histórico indisponível</li>';
   }
+}
+
+// Faixa abaixo da foto: os 4 eventos mais recentes, para mostrar que o contrato está "vivo".
+function renderizarFaixaEventos(eventos, mensagem = "Nenhum evento no contrato ainda.") {
+  const ul = $("eventos-recentes");
+  ul.innerHTML = eventos.length
+    ? eventos.slice(0, 4).map((ev) => `<li>${frase(ev)}</li>`).join("")
+    : `<li>${esc(mensagem)}</li>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,9 +377,9 @@ function renderizarPreservando(raiz, html) {
 
 // Prazo (timestamp) do estado atual do projeto + rótulo, ou null se o estado é final.
 function prazoAtual(p) {
-  if (p.status === STATUS.CAPTANDO) return { ts: p.prazoCaptacao, rotulo: "Captação termina em" };
-  if (p.status === STATUS.FINANCIADO) return { ts: p.prazoPlantio, rotulo: "Prazo de plantio termina em" };
-  if (p.status === STATUS.PLANTADO) return { ts: p.prazoVerificacao, rotulo: "Prazo de verificação termina em" };
+  if (p.status === STATUS.CAPTANDO) return { ts: p.prazoCaptacao, rotulo: "Prazo da captação:" };
+  if (p.status === STATUS.FINANCIADO) return { ts: p.prazoPlantio, rotulo: "Prazo do plantio:" };
+  if (p.status === STATUS.PLANTADO) return { ts: p.prazoVerificacao, rotulo: "Prazo da verificação:" };
   return null;
 }
 
@@ -371,19 +391,29 @@ function mensagemVazia() {
   return "";
 }
 
-// "1 projeto · 0,0000 ETH arrecadados · 500 mudas"
+// "1,9900" -> "1,99" (tira zeros à direita, deixando pelo menos 2 casas). Usado no número grande do topo.
+function formatarEthCurto(wei) {
+  return formatarEth(wei).replace(/0{1,2}$/, "");
+}
+
+// Painel do topo (sobre a foto): ETH apoiados, mudas, projetos e o estado da conexão.
 function renderizarTotais() {
-  const caixa = $("totais");
-  if (!estado.projetos.length) {
-    caixa.textContent = "";
-    return;
-  }
+  const pulso = $("pulso");
+  const msg = mensagemVazia();
+  pulso.classList.toggle("ativo", !msg);
+  pulso.textContent = msg ? msg : "Contrato ativo na Sepolia";
+
   const n = estado.projetos.length;
   const eth = estado.projetos.reduce((soma, p) => soma + p.arrecadado, 0n);
   const mudas = estado.projetos.reduce((soma, p) => soma + p.mudas, 0n);
-  caixa.textContent =
-    `${n} ${n === 1 ? "projeto" : "projetos"} · ${formatarEth(eth)} ETH arrecadados · ` +
-    `${Number(mudas).toLocaleString("pt-BR")} mudas`;
+  const temDados = n > 0;
+  $("total-eth").textContent = temDados ? formatarEthCurto(eth) : "—";
+  $("total-mudas").textContent = temDados ? Number(mudas).toLocaleString("pt-BR") : "—";
+  $("total-projetos").textContent = temDados ? String(n) : "—";
+  // Versão em frase, para leitores de tela.
+  $("totais").textContent = temDados
+    ? `${n} ${n === 1 ? "projeto" : "projetos"}, ${formatarEth(eth)} ETH apoiados, ${Number(mudas).toLocaleString("pt-BR")} mudas.`
+    : "";
 }
 
 // Botões e campos do card conforme o estado do projeto e o papel da conta.
@@ -399,8 +429,9 @@ function acoesDoProjeto(p) {
   if (p.status === STATUS.CAPTANDO) {
     if (estado.conta) {
       partes.push(
-        `<span data-ate="${p.prazoCaptacao}">` +
-        `<input type="text" inputmode="decimal" value="0,01" size="6" aria-label="Valor em ETH" data-campo="valor-${p.id}"> ETH ` +
+        `<span class="campo-apoio" data-ate="${p.prazoCaptacao}">` +
+        `<input type="text" inputmode="decimal" value="0,01" aria-label="Valor em ETH" data-campo="valor-${p.id}">` +
+        `<span class="unidade">ETH</span>` +
         `<button type="button" class="btn" data-acao="apoiar" data-id="${p.id}">Apoiar</button></span>`
       );
     } else {
@@ -410,9 +441,9 @@ function acoesDoProjeto(p) {
   } else if (p.status === STATUS.FINANCIADO) {
     if (sou) {
       partes.push(
-        `<label data-ate="${p.prazoPlantio}">Prova do plantio (foto/laudo) ` +
-        `<input type="file" data-acao="registrar-plantio" data-id="${p.id}"></label>` +
-        `<small class="vazio" data-ate="${p.prazoPlantio}">O arquivo não sai do seu computador: só o hash keccak256 vai para a blockchain. Qualquer pessoa pode recalcular o hash do mesmo arquivo para conferir.</small>`
+        `<label class="campo-prova" data-ate="${p.prazoPlantio}">Prova do plantio (foto ou laudo)` +
+        `<input type="file" data-acao="registrar-plantio" data-id="${p.id}">` +
+        `<small class="ajuda">O arquivo não sai do seu computador: só o hash keccak256 vai para a blockchain. Qualquer pessoa pode recalcular o hash do mesmo arquivo para conferir.</small></label>`
       );
     }
     partes.push(btnEncerrar);
@@ -431,27 +462,87 @@ function acoesDoProjeto(p) {
   return partes.join("");
 }
 
+// Selo colorido com o nome da etapa (classe status-captando, status-financiado…).
+function seloStatus(status) {
+  const nome = NOMES_STATUS[status] || "?";
+  return `<span class="selo status-${nome.toLowerCase()}">${nome}</span>`;
+}
+
+// Situação de cada parcela (50% + 50%), para mostrar embaixo da barra.
+function situacaoParcelas(p) {
+  if (p.status === STATUS.CANCELADO) return ["projeto cancelado", "projeto cancelado"];
+  if (p.status === STATUS.CAPTANDO) return ["aguardando a meta", "aguardando a prova"];
+  if (p.status === STATUS.VERIFICADO) return ["liberada", "liberada"];
+  if (p.status === STATUS.PLANTADO) return ["liberada", "prova em verificação"];
+  return ["liberada", "aguardando a prova"]; // Financiado
+}
+
+// Cada card mostra um recorte diferente da mesma foto da floresta (escolhido pelo número do projeto).
+const RECORTES_FOTO = ["18% 22%", "62% 55%", "88% 80%", "35% 72%", "76% 18%", "50% 42%", "8% 60%", "94% 35%"];
+
 function htmlCard(p) {
   const pct = p.meta > 0n ? Number((p.arrecadado * 100n) / p.meta) : 0;
-  const nomeStatus = NOMES_STATUS[p.status] || "?";
+  const [parcela1, parcela2] = situacaoParcelas(p);
+  const liberada = (texto) => (texto === "liberada" ? ' class="liberada"' : "");
   const prazo = prazoAtual(p);
   const temProva = p.prova && !/^0x0+$/.test(p.prova);
+  const mudas = Number(p.mudas).toLocaleString("pt-BR");
+  const recorte = RECORTES_FOTO[p.id % RECORTES_FOTO.length];
   return `
-    <article class="card">
-      <h3>${esc(p.titulo)} <small>#${p.id}</small></h3>
-      <div class="local">📍 ${esc(p.local)} · ${Number(p.mudas).toLocaleString("pt-BR")} mudas</div>
-      <div><span class="selo status-${nomeStatus.toLowerCase()}">${nomeStatus}</span></div>
-      <div class="barra" role="progressbar" aria-valuenow="${Math.min(pct, 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${Math.min(pct, 100)}%"></span></div>
-      <div>${formatarEth(p.arrecadado)} / ${formatarEth(p.meta)} ETH (${pct}%)</div>
-      ${prazo ? `<div class="prazo">⏳ ${prazo.rotulo}: <span class="contagem" data-prazo="${prazo.ts}">…</span></div>` : ""}
-      ${temProva ? `<div class="prova" title="${esc(p.prova)}">Prova do plantio: <code>${esc(abreviar(p.prova))}</code></div>` : ""}
-      <div class="acoes">${acoesDoProjeto(p)}</div>
+    <article class="card vidro">
+      <div class="card-foto" style="background-position:${recorte}">
+        <span class="numero" title="Número do projeto no contrato">nº ${p.id}</span>
+        ${seloStatus(p.status)}
+      </div>
+      <div class="card-corpo">
+        <div>
+          <h3>${esc(p.titulo)}</h3>
+          <p class="local">${mudas} mudas em ${esc(p.local)}</p>
+          ${p.nomeComunidade ? `<p class="comunidade-nome">por ${esc(p.nomeComunidade)}</p>` : ""}
+        </div>
+        <div>
+          <div class="valores">
+            <span><strong>${formatarEth(p.arrecadado)}</strong>de ${formatarEth(p.meta)} ETH</span>
+            <span>${pct}%</span>
+          </div>
+          <!-- Linha dourada da arrecadação; o tracinho no meio marca os 50% (1ª parcela). -->
+          <div class="linha-fina" role="progressbar" aria-label="Arrecadação" aria-valuenow="${Math.min(pct, 100)}" aria-valuemin="0" aria-valuemax="100">
+            <span class="metade"></span><i style="width:${Math.min(pct, 100)}%"></i>
+          </div>
+          <div class="parcelas">
+            <span${liberada(parcela1)}><b>1ª parcela</b>${parcela1}</span>
+            <span${liberada(parcela2)}><b>2ª parcela</b>${parcela2}</span>
+          </div>
+        </div>
+        ${prazo ? `<p class="prazo">${prazo.rotulo} <span class="contagem" data-prazo="${prazo.ts}">…</span></p>` : ""}
+        ${temProva ? `<p class="prova" title="${esc(p.prova)}">Prova do plantio <code>${esc(abreviar(p.prova))}</code></p>` : ""}
+        <div class="acoes">${acoesDoProjeto(p)}</div>
+      </div>
     </article>`;
+}
+
+// Botões de filtro por etapa, com a contagem de projetos em cada uma.
+function renderizarFiltros() {
+  const caixa = $("filtros");
+  if (!estado.projetos.length) {
+    caixa.innerHTML = "";
+    return;
+  }
+  const opcoes = [["todos", "Todos"], ...NOMES_STATUS.map((nome, i) => [String(i), nome])];
+  caixa.innerHTML = opcoes.map(([valor, nome]) => {
+    const qtd = valor === "todos"
+      ? estado.projetos.length
+      : estado.projetos.filter((p) => p.status === Number(valor)).length;
+    const ativo = estado.filtro === valor;
+    if (!qtd && valor !== "todos" && !ativo) return ""; // esconde etapas vazias (menos a escolhida)
+    return `<button type="button" class="filtro" data-filtro="${valor}" aria-pressed="${ativo}">${nome}<span>${qtd}</span></button>`;
+  }).join("");
 }
 
 function renderizarProjetos() {
   const lista = $("lista-projetos");
   const msg = mensagemVazia();
+  renderizarFiltros();
   if (contratoConfigurado() && !estado.web3) {
     // Sem carteira: mensagem com link para instalar a MetaMask.
     const p = document.createElement("p");
@@ -461,9 +552,16 @@ function renderizarProjetos() {
   } else if (msg) {
     lista.innerHTML = `<p class="vazio">${msg}</p>`;
   } else if (!estado.projetos.length) {
-    lista.innerHTML = '<p class="vazio">Nenhum projeto ainda.</p>';
+    lista.innerHTML = '<p class="vazio">Nenhum projeto ainda. Comunidades cadastradas podem criar o primeiro.</p>';
   } else {
-    renderizarPreservando(lista, estado.projetos.map(htmlCard).join(""));
+    const visiveis = estado.filtro === "todos"
+      ? estado.projetos
+      : estado.projetos.filter((p) => p.status === Number(estado.filtro));
+    // Mais recentes primeiro.
+    const ordenados = visiveis.slice().reverse();
+    renderizarPreservando(lista, ordenados.length
+      ? ordenados.map(htmlCard).join("")
+      : '<p class="vazio">Nenhum projeto nesta etapa.</p>');
   }
 }
 
@@ -479,24 +577,26 @@ function renderizarPainelComunidade() {
   const form = c.ativa
     ? `<form class="formulario" data-acao="criar-projeto">
          <h3>Criar projeto</h3>
-         <input required maxlength="80" placeholder="Título" data-campo="cp-titulo" aria-label="Título">
-         <input required maxlength="80" placeholder="Local (ex.: Manacapuru - AM)" data-campo="cp-local" aria-label="Local">
-         <input required type="number" min="1" step="1" placeholder="Mudas" data-campo="cp-mudas" aria-label="Quantidade de mudas">
-         <input required type="text" inputmode="decimal" placeholder="Meta (ETH, ex.: 1,5)" data-campo="cp-meta" aria-label="Meta em ETH">
-         <input required type="number" min="1" step="1" placeholder="Captação (min)" data-campo="cp-captacao" aria-label="Duração da captação em minutos">
-         <input required type="number" min="1" step="1" placeholder="Plantio (min)" data-campo="cp-plantio" aria-label="Prazo de plantio em minutos">
+         <label class="largo">Título<input required maxlength="80" placeholder="500 mudas de castanheira" data-campo="cp-titulo"></label>
+         <label class="largo">Local<input required maxlength="80" placeholder="Manacapuru - AM" data-campo="cp-local"></label>
+         <label>Mudas<input required type="number" min="1" step="1" placeholder="500" data-campo="cp-mudas"></label>
+         <label>Meta em ETH<input required type="text" inputmode="decimal" placeholder="1,5" data-campo="cp-meta"></label>
+         <label>Captação (min)<input required type="number" min="1" step="1" placeholder="10" data-campo="cp-captacao"></label>
+         <label>Plantio (min)<input required type="number" min="1" step="1" placeholder="30" data-campo="cp-plantio"></label>
          <button type="submit" class="btn">Criar projeto</button>
        </form>`
     : '<p class="aviso-inline">Sua comunidade está desativada: não pode criar novos projetos.</p>';
   const itens = meus.length
     ? meus.map((p) =>
-        `<li>#${p.id} ${esc(p.titulo)} <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span> · ${formatarEth(p.arrecadado)} / ${formatarEth(p.meta)} ETH</li>`
+        `<li><span class="item-titulo">Nº ${p.id} ${esc(p.titulo)}</span> ${seloStatus(p.status)}
+           <span class="item-valor">${formatarEth(p.arrecadado)} / ${formatarEth(p.meta)} ETH</span></li>`
       ).join("")
     : '<li class="vazio">Você ainda não criou projetos.</li>';
+  const classeRep = c.reputacao < 0n ? "reputacao negativa" : "reputacao";
   renderizarPreservando(painel, `
     <h2>Minha comunidade</h2>
-    <p><strong>${esc(c.nome)}</strong> · reputação: <strong>${c.reputacao.toString()}</strong>
-       ${c.ativa ? "" : "· <em>desativada</em>"}</p>
+    <p class="painel-subtitulo"><strong>${esc(c.nome)}</strong>${c.ativa ? "" : ", <em>desativada</em>"}</p>
+    <span class="${classeRep}">Reputação <strong>${c.reputacao.toString()}</strong></span>
     ${form}
     <h3>Meus projetos</h3>
     <ul class="lista-simples">${itens}</ul>`);
@@ -510,17 +610,17 @@ function renderizarMeusApoios() {
   const apoios = estado.projetos.filter((p) => p.contribuicao > 0n);
   const itens = apoios.length
     ? apoios.map((p) =>
-        `<li>#${p.id} ${esc(p.titulo)} — ${formatarEth(p.contribuicao)} ETH
-           <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span>
+        `<li><span class="item-titulo">Nº ${p.id} ${esc(p.titulo)}</span> ${seloStatus(p.status)}
+           <span class="item-valor">${formatarEth(p.contribuicao)} ETH</span>
            ${p.reembolsavel > 0n
              ? `<button type="button" class="btn" data-acao="reembolsar" data-id="${p.id}">Reembolsar ${formatarEth(p.reembolsavel)} ETH</button>`
              : ""}</li>`
       ).join("")
-    : '<li class="vazio">Você ainda não apoiou nenhum projeto.</li>';
+    : '<li class="vazio">Você ainda não apoiou nenhum projeto. Escolha um em captação acima.</li>';
   painel.innerHTML = `
     <h2>Meus apoios</h2>
-    <p>Total já apoiado: <strong>${formatarEth(estado.totalApoiado)} ETH</strong>
-       <small class="vazio">(soma bruta: não diminui quando você é reembolsado)</small></p>
+    <p class="total-apoiado"><strong>${formatarEth(estado.totalApoiado)} ETH</strong> já apoiados</p>
+    <p class="painel-subtitulo"><small>Soma bruta: não diminui quando você é reembolsado.</small></p>
     <ul class="lista-simples">${itens}</ul>`;
 }
 
@@ -540,15 +640,17 @@ function renderizarPainelDono() {
     p.status === STATUS.CAPTANDO || p.status === STATUS.FINANCIADO);
 
   const linhaPlantado = (p) => `
-    <li>#${p.id} ${esc(p.titulo)} · prova <code>${esc(abreviar(p.prova))}</code>
-      · <span class="contagem" data-prazo="${p.prazoVerificacao}">…</span>
+    <li><span class="item-titulo">Nº ${p.id} ${esc(p.titulo)}</span>
+      <span>prova <code>${esc(abreviar(p.prova))}</code></span>
+      <span class="contagem" data-prazo="${p.prazoVerificacao}">…</span>
       <div class="acoes" data-ate="${p.prazoVerificacao}">
         <button type="button" class="btn" data-acao="verificar" data-id="${p.id}">Verificar plantio</button>
         <input placeholder="Motivo da rejeição" maxlength="120" data-campo="rej-${p.id}" aria-label="Motivo da rejeição">
         <button type="button" class="btn btn-perigo" data-acao="rejeitar" data-id="${p.id}">Rejeitar prova</button>
       </div></li>`;
   const linhaCancelavel = (p) => `
-    <li ${p.status === STATUS.CAPTANDO ? `data-ate="${p.prazoCaptacao}"` : `data-apos="${p.prazoPlantio}"`}>#${p.id} ${esc(p.titulo)} <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span>
+    <li ${p.status === STATUS.CAPTANDO ? `data-ate="${p.prazoCaptacao}"` : `data-apos="${p.prazoPlantio}"`}>
+      <span class="item-titulo">Nº ${p.id} ${esc(p.titulo)}</span> ${seloStatus(p.status)}
       <div class="acoes">
         <input placeholder="Motivo do cancelamento" maxlength="120" data-campo="can-${p.id}" aria-label="Motivo do cancelamento">
         <button type="button" class="btn btn-perigo" data-acao="cancelar" data-id="${p.id}">Cancelar projeto</button>
@@ -556,21 +658,30 @@ function renderizarPainelDono() {
 
   renderizarPreservando(painel, `
     <h2>Painel do verificador</h2>
-    <form class="formulario" data-acao="cadastrar-comunidade">
-      <h3>Cadastrar comunidade</h3>
-      <input required placeholder="Endereço 0x…" data-campo="cc-endereco" aria-label="Endereço da comunidade">
-      <input required maxlength="80" placeholder="Nome da comunidade" data-campo="cc-nome" aria-label="Nome da comunidade">
-      <button type="submit" class="btn">Cadastrar</button>
-    </form>
-    <form class="formulario" data-acao="desativar-comunidade">
-      <h3>Desativar comunidade</h3>
-      <input required placeholder="Endereço 0x…" data-campo="dc-endereco" aria-label="Endereço da comunidade">
-      <button type="submit" class="btn btn-perigo">Desativar</button>
-    </form>
-    <h3>Plantios aguardando verificação</h3>
-    <ul class="lista-simples">${plantados.length ? plantados.map(linhaPlantado).join("") : '<li class="vazio">Nenhum plantio aguardando.</li>'}</ul>
-    <h3>Cancelamento de projetos</h3>
-    <ul class="lista-simples">${cancelaveis.length ? cancelaveis.map(linhaCancelavel).join("") : '<li class="vazio">Nenhum projeto cancelável agora.</li>'}</ul>`);
+    <p class="painel-subtitulo">Você é o dono do contrato: cadastra comunidades e confere as provas de plantio.</p>
+    <div class="dono-forms">
+      <form class="formulario" data-acao="cadastrar-comunidade">
+        <h3>Cadastrar comunidade</h3>
+        <label class="largo">Endereço<input required placeholder="0x…" data-campo="cc-endereco"></label>
+        <label class="largo">Nome<input required maxlength="80" placeholder="Viveiro Manacapuru" data-campo="cc-nome"></label>
+        <button type="submit" class="btn">Cadastrar</button>
+      </form>
+      <form class="formulario" data-acao="desativar-comunidade">
+        <h3>Desativar comunidade</h3>
+        <label class="largo">Endereço<input required placeholder="0x…" data-campo="dc-endereco"></label>
+        <button type="submit" class="btn btn-perigo">Desativar</button>
+      </form>
+    </div>
+    <div class="dono-listas">
+      <div>
+        <h3>Plantios aguardando verificação</h3>
+        <ul class="lista-simples">${plantados.length ? plantados.map(linhaPlantado).join("") : '<li class="vazio">Nenhum plantio aguardando.</li>'}</ul>
+      </div>
+      <div>
+        <h3>Cancelamento de projetos</h3>
+        <ul class="lista-simples">${cancelaveis.length ? cancelaveis.map(linhaCancelavel).join("") : '<li class="vazio">Nenhum projeto cancelável agora.</li>'}</ul>
+      </div>
+    </div>`);
 }
 
 // Mostra/esconde os painéis conforme o papel da conta e redesenha todo o conteúdo.
@@ -582,6 +693,10 @@ function renderizarPaineis() {
   renderizarPainelComunidade();
   renderizarMeusApoios();
   renderizarPainelDono();
+  // Os links do menu seguem a visibilidade das seções (só aparece o que a conta pode usar).
+  document.querySelectorAll("[data-nav]").forEach((link) => {
+    link.hidden = $(link.dataset.nav).hidden;
+  });
   atualizarContagens();
   // Se há transação em andamento, os botões recém-desenhados já nascem bloqueados.
   bloquearAcoes(estado.txPendente);
@@ -593,8 +708,8 @@ function atualizarContagens() {
   document.querySelectorAll(".contagem").forEach((el) => {
     const restante = Number(el.dataset.prazo) - t;
     el.textContent = restante > 0
-      ? formatarDuracao(restante)
-      : "prazo encerrado — pode ser encerrado por qualquer pessoa";
+      ? `faltam ${formatarDuracao(restante)}`
+      : "vencido. Qualquer pessoa pode encerrar o projeto.";
   });
   // Botões que só valem depois do prazo (encerrar) ou só até o prazo (apoiar, registrar prova).
   document.querySelectorAll("[data-apos]").forEach((el) => { el.hidden = t < Number(el.dataset.apos); });
@@ -624,6 +739,7 @@ async function atualizarTudo() {
     renderizarPaineis();
     mostrarAvisoInstalar();
     $("historico").innerHTML = '<li class="vazio">Instale a MetaMask para ver o histórico.</li>';
+    renderizarFaixaEventos([], "Instale a MetaMask para acompanhar o contrato ao vivo.");
     return;
   }
 
@@ -669,7 +785,10 @@ async function atualizarTudo() {
 
     // O histórico tem tratamento de erro próprio: se falhar, só ele avisa.
     if (contratoConfigurado() && naSepolia) await carregarHistorico(versao);
-    else $("historico").innerHTML = '<li class="vazio">Conecte-se à Sepolia para ver o histórico.</li>';
+    else {
+      $("historico").innerHTML = '<li class="vazio">Conecte-se à Sepolia para ver o histórico.</li>';
+      renderizarFaixaEventos([], "Conecte-se à Sepolia para acompanhar o contrato ao vivo.");
+    }
   } catch (e) {
     console.error(e);
     if (obsoleta()) return;
@@ -733,11 +852,15 @@ function bloquearAcoes(bloquear) {
     .forEach((el) => { el.disabled = bloquear; });
 }
 
-// Escreve uma linha de status na lista "Transações". icone: ⏳ / ✅ / ❌.
-function escreverLinhaTx(li, icone, texto, hash) {
+// Escreve uma linha de status na lista "Transações".
+// situacao: "pendente", "confirmada" ou "falhou" (vira a cor da borda via classe tx-*).
+const CLASSE_TX = { pendente: "tx-pendente", confirmada: "tx-ok", falhou: "tx-erro" };
+function escreverLinhaTx(li, situacao, texto, hash) {
+  li.className = CLASSE_TX[situacao];
   li.innerHTML =
-    `${icone} ${esc(texto)}` +
-    (hash ? ` <a href="${linkTx(hash)}" target="_blank" rel="noopener">${esc(abreviar(hash))} ↗</a>` : "");
+    `<span class="tx-situacao">${situacao === "pendente" ? "Aguardando confirmação" : situacao === "confirmada" ? "Confirmada" : "Falhou"}</span>` +
+    esc(texto) +
+    (hash ? ` <a href="${linkTx(hash)}" target="_blank" rel="noopener">${esc(abreviar(hash))}</a>` : "");
 }
 
 // Erro de validação feito por nós (já está em português; não precisa de tradução).
@@ -788,7 +911,8 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
     const recibo = await metodo.send(opcoes).on("transactionHash", (hash) => {
       hashTx = hash;
       linha = document.createElement("li");
-      escreverLinhaTx(linha, "⏳", `${descricao} — pendente`, hash);
+      escreverLinhaTx(linha, "pendente", descricao, hash);
+      $("transacoes").querySelector(".sem-tx")?.remove();
       $("transacoes").prepend(linha);
       mostrarAviso("Transação enviada. Aguardando confirmação…");
     });
@@ -796,7 +920,7 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
     // O recibo diz se a execução deu certo (status 1) ou reverteu (status 0).
     // (No Web3.js v4 um revert minerado normalmente cai no catch; este ramo é só garantia.)
     sucesso = Number(recibo.status) === 1;
-    if (linha) escreverLinhaTx(linha, sucesso ? "✅" : "❌", `${descricao} — ${sucesso ? "confirmada" : "falhou"}`, recibo.transactionHash);
+    if (linha) escreverLinhaTx(linha, sucesso ? "confirmada" : "falhou", descricao, recibo.transactionHash);
     if (!sucesso) mensagemErro = "A transação foi enviada, mas falhou na blockchain.";
   } catch (e) {
     console.error(e);
@@ -811,7 +935,7 @@ async function enviarTransacao(metodo, { value } = {}, descricao = "Transação"
       mensagemErro = traduzirErro(e);
     }
     // A linha ❌ mantém o hash para o usuário abrir a transação no Etherscan.
-    if (linha) escreverLinhaTx(linha, "❌", `${descricao} — falhou`, hashTx);
+    if (linha) escreverLinhaTx(linha, "falhou", descricao, hashTx);
   } finally {
     // 5. Libera os botões e relê a blockchain (atualizarTudo também recarrega o histórico).
     estado.txPendente = false;
@@ -971,16 +1095,16 @@ const ACOES = {
   async apoiar(id) {
     const valor = lerValorEth(textoDe(`valor-${id}`)); // erro de validação: nada é enviado
     await enviarTransacao(estado.contrato.methods.apoiar(id), { value: valor },
-      `Apoiar o projeto #${id} com ${formatarEth(valor)} ETH`);
+      `Apoiar o projeto nº ${id} com ${formatarEth(valor)} ETH`);
   },
   async encerrar(id) {
-    await enviarTransacao(estado.contrato.methods.encerrarPorPrazo(id), {}, `Encerrar o projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.encerrarPorPrazo(id), {}, `Encerrar o projeto nº ${id}`);
   },
   async reembolsar(id) {
-    await enviarTransacao(estado.contrato.methods.pedirReembolso(id), {}, `Reembolso do projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.pedirReembolso(id), {}, `Reembolso do projeto nº ${id}`);
   },
   async sacar(id) {
-    await enviarTransacao(estado.contrato.methods.sacar(id), {}, `Saque do projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.sacar(id), {}, `Saque do projeto nº ${id}`);
   },
   // Escolher o arquivo já dispara o envio (evento "change" do input file).
   async "registrar-plantio"(id, input) {
@@ -989,23 +1113,23 @@ const ACOES = {
     try {
       const hash = await hashArquivo(arquivo);
       await enviarTransacao(estado.contrato.methods.registrarPlantio(id, hash), {},
-        `Registrar plantio do projeto #${id} (hash da prova ${hash})`);
+        `Registrar plantio do projeto nº ${id} (hash da prova ${hash})`);
     } finally {
       input.value = ""; // libera a atualização automática, que pausa com arquivo escolhido
     }
   },
   async verificar(id) {
-    await enviarTransacao(estado.contrato.methods.verificarPlantio(id), {}, `Verificar plantio do projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.verificarPlantio(id), {}, `Verificar plantio do projeto nº ${id}`);
   },
   async rejeitar(id) {
     // Sem prompt() (não funciona em navegadores de celular): usa o campo ao lado do botão.
     const motivo = textoDe(`rej-${id}`) || "Prova rejeitada pelo verificador";
     await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {},
-      `Rejeitar prova do projeto #${id}`);
+      `Rejeitar prova do projeto nº ${id}`);
   },
   async cancelar(id) {
     const motivo = textoDe(`can-${id}`) || "Projeto cancelado pelo verificador";
-    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {}, `Cancelar o projeto #${id}`);
+    await enviarTransacao(estado.contrato.methods.cancelarProjeto(id, motivo), {}, `Cancelar o projeto nº ${id}`);
   },
   async "criar-projeto"() {
     const titulo = textoDe("cp-titulo");
@@ -1056,6 +1180,14 @@ function ligarAcoes() {
   document.addEventListener("click", (e) => {
     const botao = e.target.closest("button[data-acao]");
     if (botao) executarAcao(botao.dataset.acao, botao.dataset.id, botao);
+    // Filtros da lista de projetos: só redesenham a lista (não leem a blockchain).
+    const filtro = e.target.closest("button[data-filtro]");
+    if (filtro) {
+      estado.filtro = filtro.dataset.filtro;
+      renderizarProjetos();
+      atualizarContagens();
+      bloquearAcoes(estado.txPendente);
+    }
   });
   document.addEventListener("change", (e) => {
     if (e.target.matches('input[type="file"][data-acao]')) {
@@ -1088,6 +1220,10 @@ async function iniciar() {
     return;
   }
   ligarAcoes();
+  // O cabeçalho fixo ganha fundo de vidro depois que a página rola (antes fica sobre a foto).
+  const marcarRolagem = () => $("cabecalho").classList.toggle("rolou", window.scrollY > 40);
+  window.addEventListener("scroll", marcarRolagem, { passive: true });
+  marcarRolagem();
   $("btn-conectar").addEventListener("click", conectarCarteira);
   $("btn-trocar-rede").addEventListener("click", trocarParaSepolia);
 
