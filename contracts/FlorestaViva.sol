@@ -554,6 +554,69 @@ contract FlorestaViva {
         } // [Recurso: EstruturasDeControle]
     }
 
+    // ------------------------------------------------------------------
+    // Reembolso
+    // ------------------------------------------------------------------
+
+    /// @notice Quanto um apoiador recebe se pedir reembolso agora (0 se o projeto nao estiver
+    ///         Cancelado ou se ele nao tiver contribuicao).
+    /// @dev Proporcional (contribuicao * saldoReembolsavel / arrecadado); o ultimo apoiador a
+    ///      reembolsar recebe o que sobrou (saldoReembolsavel - totalReembolsado), sem resto preso.
+    /// @param id Id do projeto.
+    /// @param apoiador Endereco do apoiador.
+    /// @return Valor reembolsavel, em wei.
+    // [Recurso: Funcoes]
+    function valorReembolsavel(uint256 id, address apoiador)
+        public
+        view
+        projetoExiste(id) // [Recurso: Modificadores]
+        returns (uint256)
+    {
+        Projeto storage p = projetos[id];
+        uint256 c = contribuicoes[id][apoiador];
+
+        // Checa antes de dividir: projeto cancelado sem apoios tem arrecadado == 0.
+        if (p.status != Status.Cancelado || c == 0) {
+            return 0;
+        } // [Recurso: EstruturasDeControle]
+
+        if (p.contribuicoesReembolsadas + c == p.arrecadado) {
+            return p.saldoReembolsavel - p.totalReembolsado; // ultimo: absorve o arredondamento
+        }
+        return (c * p.saldoReembolsavel) / p.arrecadado;
+    }
+
+    /// @notice O apoiador recupera sua parte do dinheiro de um projeto Cancelado.
+    /// @dev Checks-effects-interactions: zera a contribuicao e atualiza os totais antes de
+    ///      enviar o ETH. Valor calculado 0 conclui sem transferir.
+    /// @param id Id do projeto.
+    // [Recurso: Funcoes]
+    function pedirReembolso(uint256 id)
+        external
+        projetoExiste(id) // [Recurso: Modificadores]
+        noEstado(id, Status.Cancelado) // [Recurso: Modificadores]
+        semReentrada // [Recurso: Modificadores]
+    {
+        // Checks
+        uint256 c = contribuicoes[id][msg.sender];
+        if (c == 0) {
+            revert NadaAReembolsar(); // [Recurso: EventosEErros]
+        }
+        uint256 valor = valorReembolsavel(id, msg.sender);
+
+        // Effects
+        Projeto storage p = projetos[id];
+        contribuicoes[id][msg.sender] = 0;
+        p.contribuicoesReembolsadas += c;
+        p.totalReembolsado += valor;
+        emit ReembolsoRealizado(id, msg.sender, valor); // [Recurso: EventosEErros]
+
+        // Interactions
+        if (valor > 0) {
+            _transferir(payable(msg.sender), valor);
+        }
+    }
+
     /// @dev Cancela o projeto: grava o saldo reembolsavel (arrecadado - sacado), muda o status
     ///      e, se `penalizar`, tira 1 ponto de reputacao da comunidade.
     // [Recurso: Funcoes]

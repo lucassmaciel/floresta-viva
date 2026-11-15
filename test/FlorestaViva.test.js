@@ -355,7 +355,8 @@ describe("Ciclo do plantio", function () {
 
   it("registrar: prova zero, após o prazo e por não-comunidade", async function () {
     const { contrato, comunidade, apoiador } = await financiado();
-    await expect(contrato.connect(comunidade).registrarPlantio(0, ethers.ZeroHash)).to.be.reverted;
+    await expect(contrato.connect(comunidade).registrarPlantio(0, ethers.ZeroHash))
+      .to.be.revertedWith("Prova invalida");
     await expect(contrato.connect(apoiador).registrarPlantio(0, prova))
       .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
       .withArgs(apoiador.address);
@@ -637,6 +638,97 @@ describe("Ciclo do plantio", function () {
     await time.increase(31 * 60);
     await contrato.connect(outro).encerrarPorPrazo(0);
     await expect(criarProjetoPadrao(contrato, comunidade)).to.emit(contrato, "ProjetoCriado");
+  });
+});
+
+describe("Reembolso", function () {
+  const eth = (v) => ethers.parseEther(v);
+  const prova = ethers.id("foto-plantio.jpg");
+
+  async function captando() {
+    const ctx = await implantar();
+    await ctx.contrato.cadastrarComunidade(ctx.comunidade.address, "Viveiro Manacapuru");
+    await criarProjetoPadrao(ctx.contrato, ctx.comunidade);
+    return ctx;
+  }
+
+  it("integral quando meta não atingida", async function () {
+    const { contrato, apoiador, outro } = await captando();
+    await contrato.connect(apoiador).apoiar(0, { value: eth("0.3") });
+    await time.increase(31 * 60);
+    await contrato.connect(outro).encerrarPorPrazo(0);
+    expect(await contrato.valorReembolsavel(0, apoiador.address)).to.equal(eth("0.3"));
+    const tx = contrato.connect(apoiador).pedirReembolso(0);
+    await expect(tx).to.changeEtherBalance(apoiador, eth("0.3"));
+    await expect(tx).to.emit(contrato, "ReembolsoRealizado").withArgs(0, apoiador.address, eth("0.3"));
+    await expect(contrato.connect(apoiador).pedirReembolso(0))
+      .to.be.revertedWithCustomError(contrato, "NadaAReembolsar");
+  });
+
+  it("proporcional após 1ª parcela", async function () {
+    const { contrato, comunidade, apoiador, apoiador2, outro } = await captando();
+    await financiar(contrato, 0, [apoiador, apoiador2]);
+    await contrato.connect(comunidade).sacar(0);
+    await time.increase(61 * 60);
+    await contrato.connect(outro).encerrarPorPrazo(0);
+    await expect(contrato.connect(apoiador).pedirReembolso(0))
+      .to.changeEtherBalance(apoiador, eth("0.3"));
+    await expect(contrato.connect(apoiador2).pedirReembolso(0))
+      .to.changeEtherBalance(apoiador2, eth("0.2"));
+    expect(await ethers.provider.getBalance(await contrato.getAddress())).to.equal(0n);
+  });
+
+  it("sem resto preso", async function () {
+    const { contrato, comunidade, apoiador, apoiador2, outro } = await captando();
+    const [, , , , , terceiro] = await ethers.getSigners();
+    await criarProjetoPadrao(contrato, comunidade, { meta: 10n });
+    // projeto 0 fica de lado; usa o projeto 1 (meta 10 wei)
+    await contrato.connect(apoiador).apoiar(1, { value: 3n });
+    await contrato.connect(apoiador2).apoiar(1, { value: 3n });
+    await contrato.connect(terceiro).apoiar(1, { value: 4n });
+    await contrato.connect(comunidade).sacar(1); // 5 wei
+    await time.increase(61 * 60);
+    await contrato.connect(outro).encerrarPorPrazo(1);
+    let soma = 0n;
+    for (const conta of [apoiador, apoiador2, terceiro]) {
+      soma += await contrato.valorReembolsavel(1, conta.address);
+      await contrato.connect(conta).pedirReembolso(1);
+    }
+    expect(soma).to.equal(5n); // 1 + 1 + 3: o último absorve o arredondamento
+    expect(await ethers.provider.getBalance(await contrato.getAddress())).to.equal(0n);
+    const p = await contrato.obterProjeto(1);
+    expect(p.contribuicoesReembolsadas).to.equal(10n);
+    expect(p.totalReembolsado).to.equal(5n);
+  });
+
+  it("antes de cancelado", async function () {
+    const { contrato, apoiador } = await captando();
+    await contrato.connect(apoiador).apoiar(0, { value: eth("0.3") });
+    await expect(contrato.connect(apoiador).pedirReembolso(0))
+      .to.be.revertedWithCustomError(contrato, "EstadoInvalido");
+    await expect(contrato.connect(apoiador).pedirReembolso(7))
+      .to.be.revertedWithCustomError(contrato, "ProjetoInexistente");
+    expect(await contrato.valorReembolsavel(0, apoiador.address)).to.equal(0n);
+  });
+
+  it("cancelado sem apoios", async function () {
+    const { contrato, apoiador } = await captando();
+    await contrato.cancelarProjeto(0, "Suspeita");
+    expect(await contrato.valorReembolsavel(0, apoiador.address)).to.equal(0n);
+    await expect(contrato.connect(apoiador).pedirReembolso(0))
+      .to.be.revertedWithCustomError(contrato, "NadaAReembolsar");
+  });
+
+  it("reentrância bloqueada", async function () {
+    const { contrato, outro } = await captando();
+    const Atacante = await ethers.getContractFactory("AtacanteReentrancia");
+    const atacante = await Atacante.deploy(await contrato.getAddress());
+    await atacante.apoiar(0, { value: eth("0.3") });
+    await contrato.cancelarProjeto(0, "Suspeita");
+    await expect(atacante.atacar())
+      .to.be.revertedWithCustomError(contrato, "TransferenciaFalhou");
+    expect(await contrato.contribuicoes(0, await atacante.getAddress())).to.equal(eth("0.3"));
+    expect(await ethers.provider.getBalance(await contrato.getAddress())).to.equal(eth("0.3"));
   });
 });
 
