@@ -1,8 +1,7 @@
 {
   "name": "dapp-ethereum",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Floresta Viva: dApp de financiamento coletivo de reflorestamento na Amazônia (Ethereum Sepolia). Hardhat só roda os testes automatizados locais.",
   "directories": {
     "doc": "docs"
   },
@@ -12,7 +11,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "hardhat": "^2.29.2"
