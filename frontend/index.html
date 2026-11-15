@@ -5,61 +5,108 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Floresta Viva</title>
   <meta name="description" content="Financiamento coletivo de reflorestamento na Amazônia, com transparência na blockchain.">
+  <meta name="theme-color" content="#06100b">
+  <link rel="preload" as="image" href="img/floresta.webp" media="(min-width: 761px)">
+  <link rel="preload" as="image" href="img/floresta-900.webp" media="(max-width: 760px)">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..700;1,6..96,400..600&family=Hanken+Grotesk:wght@300..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <a class="pular" href="#projetos">Pular para os projetos</a>
+
   <header id="cabecalho">
-    <h1 class="marca">🌳 Floresta Viva</h1>
+    <a class="marca" href="#topo" aria-label="Floresta Viva, início">Floresta Viva</a>
+    <nav class="navegacao" aria-label="Seções">
+      <a href="#projetos">Projetos</a>
+      <a href="#atividade">Histórico</a>
+    </nav>
     <div class="cabecalho-carteira">
-      <span id="selo-rede" class="selo selo-neutro">Sem rede</span>
-      <span id="conta" class="conta"></span>
-      <span id="saldo" class="saldo"></span>
+      <span id="selo-rede" class="selo-rede selo-neutro">Sem rede</span>
+      <span class="carteira-dados">
+        <span id="conta" class="conta"></span>
+        <span id="saldo" class="saldo"></span>
+      </span>
       <button id="btn-conectar" type="button" class="btn">Conectar carteira</button>
     </div>
   </header>
 
-  <div id="aviso-rede" class="aviso aviso-rede" hidden>
-    <span id="aviso-rede-texto">Você está na rede errada.</span>
-    <button id="btn-trocar-rede" type="button" class="btn btn-secundario">Trocar para Sepolia</button>
+  <div class="palco">
+
+    <div id="aviso-rede" class="aviso aviso-rede" hidden>
+      <span id="aviso-rede-texto">Você está na rede errada.</span>
+      <button id="btn-trocar-rede" type="button" class="btn">Trocar para Sepolia</button>
+    </div>
+
+    <div id="aviso-geral" class="aviso aviso-geral" role="status" aria-live="polite" hidden></div>
+
+    <section id="topo" class="hero" aria-labelledby="titulo-hero">
+      <div class="hero-texto">
+        <h1 id="titulo-hero">A floresta,<br><em>viva.</em></h1>
+        <p class="hero-sub">Financie o plantio de árvores na Amazônia. Metade do dinheiro sai quando a meta é atingida; a outra metade, só com a prova do plantio, gravada na blockchain.</p>
+      </div>
+      <aside class="painel-vivo vidro" aria-label="Resumo do contrato">
+        <span id="pulso" class="pulso">Lendo o contrato…</span>
+        <p class="grande"><span id="total-eth">—</span><small>ETH apoiados</small></p>
+        <div class="pequenos">
+          <span><b id="total-mudas">—</b>mudas</span>
+          <span><b id="total-projetos">—</b>projetos</span>
+        </div>
+        <p id="totais" class="sr-only"></p>
+      </aside>
+    </section>
+
+    <div class="faixa-eventos" aria-label="Eventos recentes">
+      <ul id="eventos-recentes"><li>Os eventos mais recentes do contrato aparecem aqui.</li></ul>
+    </div>
   </div>
 
-  <div id="aviso-geral" class="aviso aviso-geral" role="status" aria-live="polite" hidden></div>
-
   <main>
-    <section id="totais" class="totais" aria-label="Totais"></section>
-
-    <section class="secao">
-      <h2>Projetos</h2>
+    <section id="projetos" class="secao" aria-labelledby="titulo-projetos">
+      <div class="secao-topo">
+        <h2 id="titulo-projetos">Projetos <em>em curso</em></h2>
+      </div>
+      <p class="secao-nota">Se algo falhar, quem apoiou recebe de volta o que ficou retido no contrato.</p>
       <div id="lista-projetos" class="grade-projetos">
         <p class="vazio">Carregando projetos…</p>
       </div>
     </section>
 
-    <section id="painel-comunidade" class="secao painel" hidden>
-      <h2>Minha comunidade</h2>
-    </section>
+    <div class="paineis">
+      <section id="painel-comunidade" class="secao painel vidro" hidden>
+        <h2>Minha comunidade</h2>
+      </section>
 
-    <section id="meus-apoios" class="secao painel" hidden>
-      <h2>Meus apoios</h2>
-    </section>
+      <section id="meus-apoios" class="secao painel vidro" hidden>
+        <h2>Meus apoios</h2>
+      </section>
+    </div>
 
-    <section id="painel-dono" class="secao painel" hidden>
+    <section id="painel-dono" class="secao painel vidro painel-dono" hidden>
       <h2>Painel do verificador</h2>
     </section>
 
-    <section class="secao">
-      <h2>Histórico de eventos</h2>
-      <ul id="historico" class="lista-simples"></ul>
-    </section>
+    <div id="atividade" class="atividade">
+      <section class="secao" aria-labelledby="titulo-historico">
+        <h2 id="titulo-historico">Histórico de eventos</h2>
+        <p class="secao-nota">Tudo o que aconteceu no contrato, do mais recente ao mais antigo.</p>
+        <ul id="historico" class="linha-do-tempo"></ul>
+      </section>
 
-    <section class="secao">
-      <h2>Transações</h2>
-      <ul id="transacoes" class="lista-simples"></ul>
-    </section>
+      <section class="secao" aria-labelledby="titulo-transacoes">
+        <h2 id="titulo-transacoes">Transações</h2>
+        <p class="secao-nota">O que você enviou nesta visita.</p>
+        <ul id="transacoes" class="lista-tx">
+          <li class="vazio sem-tx">Nenhuma transação enviada ainda.</li>
+        </ul>
+      </section>
+    </div>
   </main>
 
   <footer class="rodape">
-    Floresta Viva · rede de teste Sepolia · nenhum valor real é movimentado
+    <p>Floresta Viva roda na rede de teste Sepolia. Nenhum valor real é movimentado.</p>
+    <p class="credito">Foto: Floresta Amazônica perto de Manaus, por Neil Palmer (CIAT), licença <a href="https://creativecommons.org/licenses/by-sa/2.0/" target="_blank" rel="noopener">CC BY-SA 2.0</a>, via <a href="https://commons.wikimedia.org/wiki/File:Amazon_CIAT_(3).jpg" target="_blank" rel="noopener">Wikimedia Commons</a>. Imagem reduzida e recomprimida.</p>
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/web3@4.16.0/dist/web3.min.js"></script>
