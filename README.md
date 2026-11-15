@@ -42,7 +42,7 @@ Passo a passo do deploy e da verificação: [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## 4. Aplicação publicada (Vercel)
 
-URL: <!-- PREENCHER: https://<projeto>.vercel.app -->
+URL: https://floresta-viva-frontend.vercel.app/
 
 ## 5. Diagrama de estados
 
