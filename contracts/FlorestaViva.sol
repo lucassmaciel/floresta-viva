@@ -91,8 +91,11 @@ contract FlorestaViva {
     // ------------------------------------------------------------------
 
     // [Recurso: EventosEErros]
+    /// @notice Uma comunidade foi cadastrada pelo dono.
     event ComunidadeCadastrada(address indexed conta, string nome);
+    /// @notice Uma comunidade foi desativada pelo dono.
     event ComunidadeDesativada(address indexed conta);
+    /// @notice Um projeto de reflorestamento foi criado.
     event ProjetoCriado(
         uint256 indexed id,
         address indexed comunidade,
@@ -100,12 +103,19 @@ contract FlorestaViva {
         uint256 meta,
         uint256 prazoCaptacao
     );
+    /// @notice Um apoiador contribuiu com ETH para um projeto.
     event ApoioRecebido(uint256 indexed id, address indexed apoiador, uint256 valor);
+    /// @notice O projeto atingiu a meta e passou a Financiado.
     event ProjetoFinanciado(uint256 indexed id, uint256 arrecadado, uint256 prazoPlantio);
+    /// @notice A comunidade registrou a prova de plantio.
     event PlantioRegistrado(uint256 indexed id, bytes32 prova);
+    /// @notice O dono verificou o plantio e liberou o projeto.
     event PlantioVerificado(uint256 indexed id, address indexed verificador);
+    /// @notice O projeto foi cancelado e o saldo ficou reembolsavel.
     event ProjetoCancelado(uint256 indexed id, string motivo, uint256 saldoReembolsavel);
+    /// @notice A comunidade sacou fundos do projeto.
     event SaqueRealizado(uint256 indexed id, address indexed comunidade, uint256 valor);
+    /// @notice Um apoiador recebeu reembolso.
     event ReembolsoRealizado(uint256 indexed id, address indexed apoiador, uint256 valor);
 
     // ------------------------------------------------------------------
@@ -113,16 +123,27 @@ contract FlorestaViva {
     // ------------------------------------------------------------------
 
     // [Recurso: EventosEErros]
+    /// @notice O chamador nao tem permissao para a operacao.
     error NaoAutorizado(address chamador);
+    /// @notice O id informado nao corresponde a nenhum projeto.
     error ProjetoInexistente(uint256 id);
+    /// @notice O projeto nao esta no estado exigido pela operacao.
     error EstadoInvalido(uint256 id, Status atual, Status esperado);
+    /// @notice A operacao exige que o prazo ja tenha vencido.
     error PrazoNaoEncerrado(uint256 agora, uint256 prazo);
+    /// @notice A operacao exige que o prazo ainda esteja aberto.
     error PrazoEncerrado(uint256 prazo);
+    /// @notice O valor enviado e invalido.
     error ValorInvalido();
+    /// @notice Nao ha saldo disponivel para saque.
     error NadaASacar();
+    /// @notice Nao ha valor a reembolsar para o apoiador.
     error NadaAReembolsar();
+    /// @notice A reputacao da comunidade impede novos projetos.
     error ReputacaoInsuficiente(int256 atual);
+    /// @notice A comunidade atingiu o limite de projetos ativos.
     error LimiteDeProjetosAtingido(uint256 limite);
+    /// @notice A transferencia de ETH falhou.
     error TransferenciaFalhou(address para, uint256 valor);
 
     // ------------------------------------------------------------------
@@ -489,9 +510,12 @@ contract FlorestaViva {
         emit PlantioVerificado(id, msg.sender); // [Recurso: EventosEErros]
     }
 
-    /// @notice O dono cancela um projeto: Captando (suspeita), Financiado (so depois de
-    ///         prazoPlantio) ou Plantado (prova rejeitada, antes de prazoVerificacao).
-    /// @dev Toda via do dono penaliza a comunidade em -1 de reputacao.
+    /// @notice O dono cancela um projeto: Captando (suspeita, antes de prazoCaptacao),
+    ///         Financiado (so depois de prazoPlantio) ou Plantado (prova rejeitada,
+    ///         antes de prazoVerificacao).
+    /// @dev Toda via do dono penaliza a comunidade em -1 de reputacao. Regra "sem corrida
+    ///      apos os prazos": vencido o prazo de Captando ou de Plantado, o dono nao cancela
+    ///      mais (PrazoEncerrado) e apenas encerrarPorPrazo decide o desfecho.
     /// @param id Id do projeto.
     /// @param motivo Texto livre explicando o cancelamento.
     // [Recurso: Funcoes]
@@ -503,7 +527,10 @@ contract FlorestaViva {
         Projeto storage p = projetos[id];
 
         if (p.status == Status.Captando) {
-            // Suspeita: o dono pode cancelar a qualquer momento.
+            // Suspeita: so enquanto a captacao esta aberta; depois so encerrarPorPrazo decide.
+            if (block.timestamp >= p.prazoCaptacao) {
+                revert PrazoEncerrado(p.prazoCaptacao); // [Recurso: EventosEErros]
+            }
             _cancelar(p, motivo, true);
         } else if (p.status == Status.Financiado) {
             // Protege a comunidade: so depois de vencido o prazo de plantio.

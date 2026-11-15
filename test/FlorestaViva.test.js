@@ -464,6 +464,26 @@ describe("Ciclo do plantio", function () {
       .withArgs(9);
   });
 
+  it("fronteira cancelarProjeto em Captando: prazo-1 cancela (-1), prazo reverte e encerrarPorPrazo decide", async function () {
+    let c = await captando();
+    const prazoCap = async (x) => Number((await x.obterProjeto(0)).prazoCaptacao);
+    let prazo = await prazoCap(c.contrato);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(c.contrato.connect(c.dono).cancelarProjeto(0, "suspeita"))
+      .to.emit(c.contrato, "ProjetoCancelado");
+    expect(await reputacao(c.contrato, c.comunidade)).to.equal(-1n);
+
+    c = await captando();
+    prazo = await prazoCap(c.contrato);
+    await time.setNextBlockTimestamp(prazo);
+    await expect(c.contrato.connect(c.dono).cancelarProjeto(0, "x"))
+      .to.be.revertedWithCustomError(c.contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+    await expect(c.contrato.connect(c.outro).encerrarPorPrazo(0))
+      .to.emit(c.contrato, "ProjetoCancelado");
+    expect(await reputacao(c.contrato, c.comunidade)).to.equal(0n);
+  });
+
   it("fronteira registrarPlantio: prazo-1 abre, prazo reverte e encerra", async function () {
     let c = await financiado();
     let prazo = await prazoPlantioDe(c.contrato);
