@@ -218,6 +218,30 @@ Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou),
 
 Link: <!-- PREENCHER: link do vídeo (3 a 5 min) -->
 
+## 15. Declaração de uso de IA
+
+Usamos o **Claude (Anthropic)** como assistente de programação. A divisão foi esta:
+
+**Decisões e trabalho da equipe**
+- Escolha do tema (reflorestamento na Amazônia) e do problema a resolver.
+- Definição das regras de negócio: liberação em duas parcelas (50% na meta, 50% após a verificação), devolução do valor retido aos apoiadores quando a verificação não acontece no prazo e papéis de dono, comunidade e apoiador.
+- Aprovação do design e do plano de implementação, e divisão do trabalho pelos papéis sugeridos no guia.
+- Configuração da MetaMask com as três contas, obtenção de SepoliaETH, compilação e deploy do contrato no Remix (incluindo o argumento do constructor) e verificação no Etherscan.
+- Publicação no GitHub e na Vercel, testes de ponta a ponta na Sepolia, vídeo, slides e apresentação.
+
+**Uso da IA**
+- Geração do código do contrato e do frontend a partir das regras definidas pela equipe.
+- Testes automatizados (Hardhat) e revisões de código de cada etapa.
+- Primeira versão da documentação, depois revisada pela equipe.
+
+Todo o código foi revisado pela equipe, que é responsável pelo conteúdo entregue e sabe explicá-lo.
+
+O que cada integrante fez, revisou e testou:
+
+- **Lucas Maciel Gomes**: contrato, backend e ajuda no frontend.
+- **Izabella de Lima Catrinck**: regras de negócio e frontend.
+- **Caio Jorge**: documentação e backend.
+
 ## Estrutura do repositório
 
 ```
