@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 // Implanta o contrato com prazo de verificação de 10 minutos e devolve as contas de teste.
 async function implantar() {
@@ -25,6 +26,13 @@ async function criarProjetoPadrao(contrato, comunidade, ov = {}) {
   return contrato
     .connect(comunidade)
     .criarProjeto(p.titulo, p.local, p.mudas, p.meta, p.durCap, p.durPlantio);
+}
+
+// Financia o projeto `id` até a meta (1 ETH): apoiador 0.6 ETH + apoiador2 0.4 ETH.
+async function financiar(contrato, id, apoiadores) {
+  const [a1, a2] = apoiadores;
+  await contrato.connect(a1).apoiar(id, { value: ethers.parseEther("0.6") });
+  return contrato.connect(a2).apoiar(id, { value: ethers.parseEther("0.4") });
 }
 
 describe("Comunidades", function () {
@@ -167,4 +175,141 @@ describe("Projetos", function () {
   });
 });
 
-module.exports = { implantar, criarProjetoPadrao };
+describe("Apoio e saque", function () {
+  async function comProjeto() {
+    const ctx = await implantar();
+    await ctx.contrato.cadastrarComunidade(ctx.comunidade.address, "Viveiro Manacapuru");
+    await criarProjetoPadrao(ctx.contrato, ctx.comunidade);
+    return ctx;
+  }
+  const eth = (v) => ethers.parseEther(v);
+
+  it("apoia", async function () {
+    const { contrato, apoiador } = await comProjeto();
+    await expect(contrato.connect(apoiador).apoiar(0, { value: eth("0.3") }))
+      .to.emit(contrato, "ApoioRecebido")
+      .withArgs(0, apoiador.address, eth("0.3"));
+    expect(await contrato.contribuicoes(0, apoiador.address)).to.equal(eth("0.3"));
+    expect(await contrato.totalApoiadoPor(apoiador.address)).to.equal(eth("0.3"));
+    expect(await ethers.provider.getBalance(await contrato.getAddress())).to.equal(eth("0.3"));
+  });
+
+  it("rejeita valor zero", async function () {
+    const { contrato, apoiador } = await comProjeto();
+    await expect(contrato.connect(apoiador).apoiar(0, { value: 0 }))
+      .to.be.revertedWithCustomError(contrato, "ValorInvalido");
+  });
+
+  it("rejeita apoio após o prazo de captação", async function () {
+    const { contrato, apoiador } = await comProjeto();
+    const prazo = (await contrato.obterProjeto(0)).prazoCaptacao;
+    await time.increase(31 * 60);
+    await expect(contrato.connect(apoiador).apoiar(0, { value: eth("0.1") }))
+      .to.be.revertedWithCustomError(contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+  });
+
+  it("fronteira do prazo: em prazo reverte, em prazo-1 aceita", async function () {
+    const { contrato, apoiador } = await comProjeto();
+    const prazo = Number((await contrato.obterProjeto(0)).prazoCaptacao);
+    await time.setNextBlockTimestamp(prazo - 1);
+    await expect(contrato.connect(apoiador).apoiar(0, { value: eth("0.1") }))
+      .to.emit(contrato, "ApoioRecebido");
+    await time.setNextBlockTimestamp(prazo);
+    await expect(contrato.connect(apoiador).apoiar(0, { value: eth("0.1") }))
+      .to.be.revertedWithCustomError(contrato, "PrazoEncerrado")
+      .withArgs(prazo);
+  });
+
+  it("financia ao bater a meta", async function () {
+    const { contrato, apoiador, apoiador2 } = await comProjeto();
+    const tx = await financiar(contrato, 0, [apoiador, apoiador2]);
+    const bloco = await ethers.provider.getBlock(tx.blockNumber);
+    await expect(tx)
+      .to.emit(contrato, "ProjetoFinanciado")
+      .withArgs(0, eth("1"), BigInt(bloco.timestamp) + 3600n);
+    const p = await contrato.obterProjeto(0);
+    expect(p.status).to.equal(1n);
+    expect(p.prazoPlantio).to.equal(BigInt(bloco.timestamp) + 3600n);
+  });
+
+  it("aceita excedente", async function () {
+    const { contrato, apoiador } = await comProjeto();
+    await contrato.connect(apoiador).apoiar(0, { value: eth("1.5") });
+    const p = await contrato.obterProjeto(0);
+    expect(p.arrecadado).to.equal(eth("1.5"));
+    expect(p.status).to.equal(1n);
+  });
+
+  it("rejeita apoio após financiado", async function () {
+    const { contrato, apoiador, apoiador2, outro } = await comProjeto();
+    await financiar(contrato, 0, [apoiador, apoiador2]);
+    await expect(contrato.connect(outro).apoiar(0, { value: eth("0.1") }))
+      .to.be.revertedWithCustomError(contrato, "EstadoInvalido")
+      .withArgs(0, 1, 0);
+  });
+
+  it("apoiar projeto inexistente", async function () {
+    const { contrato, apoiador } = await comProjeto();
+    await expect(contrato.connect(apoiador).apoiar(9, { value: 1 }))
+      .to.be.revertedWithCustomError(contrato, "ProjetoInexistente")
+      .withArgs(9);
+  });
+
+  it("disponível para saque", async function () {
+    const { contrato, apoiador, apoiador2 } = await comProjeto();
+    expect(await contrato.disponivelParaSaque(0)).to.equal(0n);
+    await financiar(contrato, 0, [apoiador, apoiador2]);
+    expect(await contrato.disponivelParaSaque(0)).to.equal(eth("0.5"));
+    expect(await contrato.calcularPrimeiraParcela(eth("1"))).to.equal(eth("0.5"));
+  });
+
+  it("saca a primeira parcela uma única vez", async function () {
+    const { contrato, comunidade, apoiador, apoiador2 } = await comProjeto();
+    await financiar(contrato, 0, [apoiador, apoiador2]);
+    const tx = contrato.connect(comunidade).sacar(0);
+    await expect(tx).to.changeEtherBalances(
+      [contrato, comunidade],
+      [-eth("0.5"), eth("0.5")]
+    );
+    await expect(tx).to.emit(contrato, "SaqueRealizado").withArgs(0, comunidade.address, eth("0.5"));
+    expect((await contrato.obterProjeto(0)).sacado).to.equal(eth("0.5"));
+    await expect(contrato.connect(comunidade).sacar(0))
+      .to.be.revertedWithCustomError(contrato, "NadaASacar");
+  });
+
+  it("só a comunidade do projeto saca", async function () {
+    const { contrato, apoiador, apoiador2 } = await comProjeto();
+    await financiar(contrato, 0, [apoiador, apoiador2]);
+    await expect(contrato.connect(apoiador).sacar(0))
+      .to.be.revertedWithCustomError(contrato, "NaoAutorizado")
+      .withArgs(apoiador.address);
+  });
+
+  it("sacar projeto inexistente", async function () {
+    const { contrato, comunidade } = await comProjeto();
+    await expect(contrato.connect(comunidade).sacar(9))
+      .to.be.revertedWithCustomError(contrato, "ProjetoInexistente")
+      .withArgs(9);
+  });
+
+  it("sem financiamento não há o que sacar", async function () {
+    const { contrato, comunidade } = await comProjeto();
+    await expect(contrato.connect(comunidade).sacar(0))
+      .to.be.revertedWithCustomError(contrato, "NadaASacar");
+  });
+
+  it("comunidade desativada ainda saca", async function () {
+    const { contrato, dono, comunidade, apoiador, apoiador2 } = await comProjeto();
+    await financiar(contrato, 0, [apoiador, apoiador2]);
+    await contrato.connect(dono).desativarComunidade(comunidade.address);
+    await expect(contrato.connect(comunidade).sacar(0)).to.changeEtherBalance(comunidade, eth("0.5"));
+  });
+
+  it("ETH direto é rejeitado", async function () {
+    const { contrato, dono } = await comProjeto();
+    await expect(dono.sendTransaction({ to: await contrato.getAddress(), value: 1 })).to.be.reverted;
+  });
+});
+
+module.exports = { implantar, criarProjetoPadrao, financiar };

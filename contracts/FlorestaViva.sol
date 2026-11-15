@@ -74,6 +74,14 @@ contract FlorestaViva {
     // [Recurso: ArraysEMappings]
     mapping(address => Comunidade) public comunidades;
 
+    /// @notice Quanto (em wei) cada apoiador colocou em cada projeto: contribuicoes[id][apoiador].
+    // [Recurso: ArraysEMappings]
+    mapping(uint256 => mapping(address => uint256)) public contribuicoes;
+
+    /// @notice Total (em wei) que cada endereco ja apoiou, somando todos os projetos.
+    // [Recurso: ArraysEMappings]
+    mapping(address => uint256) public totalApoiadoPor;
+
     /// @dev Trava usada pelo modificador semReentrada.
     // [Recurso: TiposDeDados]
     bool private travado;
@@ -332,6 +340,111 @@ contract FlorestaViva {
         returns (Projeto memory)
     {
         return projetos[id];
+    }
+
+    // ------------------------------------------------------------------
+    // Apoio, financiamento e saque
+    // ------------------------------------------------------------------
+
+    /// @notice Apoia um projeto em captacao enviando ETH. O apoio que atinge a meta financia o
+    ///         projeto na mesma transacao (o excedente e aceito).
+    /// @param id Id do projeto.
+    // [Recurso: Funcoes]
+    function apoiar(uint256 id)
+        external
+        payable
+        projetoExiste(id) // [Recurso: Modificadores]
+        noEstado(id, Status.Captando) // [Recurso: Modificadores]
+    {
+        Projeto storage p = projetos[id];
+
+        if (msg.value == 0) {
+            revert ValorInvalido(); // [Recurso: EventosEErros]
+        }
+        // Aberto enquanto agora < prazo; em prazo ou depois a captacao esta encerrada.
+        if (block.timestamp >= p.prazoCaptacao) {
+            revert PrazoEncerrado(p.prazoCaptacao); // [Recurso: EventosEErros]
+        }
+
+        // Efeitos: registra o apoio.
+        p.arrecadado += msg.value;
+        contribuicoes[id][msg.sender] += msg.value; // [Recurso: ArraysEMappings]
+        totalApoiadoPor[msg.sender] += msg.value;
+        emit ApoioRecebido(id, msg.sender, msg.value); // [Recurso: EventosEErros]
+
+        // Bateu a meta: o projeto passa a Financiado e comeca a contar o prazo de plantio.
+        if (p.arrecadado >= p.meta) {
+            p.status = Status.Financiado;
+            p.prazoPlantio = block.timestamp + p.duracaoPlantio;
+            emit ProjetoFinanciado(id, p.arrecadado, p.prazoPlantio); // [Recurso: EventosEErros]
+        } // [Recurso: EstruturasDeControle]
+    }
+
+    /// @notice Calcula a primeira parcela (PERCENTUAL_PRIMEIRA_PARCELA %) de um valor.
+    /// @param valor Valor total arrecadado, em wei.
+    /// @return A primeira parcela, em wei.
+    // [Recurso: Funcoes]
+    function calcularPrimeiraParcela(uint256 valor) public pure returns (uint256) {
+        return (valor * PERCENTUAL_PRIMEIRA_PARCELA) / 100;
+    }
+
+    /// @notice Quanto a comunidade ainda pode sacar do projeto agora.
+    /// @dev Financiado/Plantado liberam a primeira parcela; Verificado libera tudo;
+    ///      Captando/Cancelado nao liberam nada novo. Resultado = liberado - sacado.
+    /// @param id Id do projeto.
+    /// @return Valor disponivel, em wei.
+    // [Recurso: Funcoes]
+    function disponivelParaSaque(uint256 id)
+        public
+        view
+        projetoExiste(id) // [Recurso: Modificadores]
+        returns (uint256)
+    {
+        Projeto storage p = projetos[id];
+        uint256 liberado;
+
+        if (p.status == Status.Financiado || p.status == Status.Plantado) {
+            liberado = calcularPrimeiraParcela(p.arrecadado);
+        } else if (p.status == Status.Verificado) {
+            liberado = p.arrecadado;
+        } else {
+            liberado = p.sacado; // Captando ou Cancelado: nada novo
+        } // [Recurso: EstruturasDeControle]
+
+        return liberado - p.sacado;
+    }
+
+    /// @notice A comunidade do projeto saca o valor liberado ainda nao sacado.
+    /// @dev Checks-effects-interactions: atualiza `sacado` antes de enviar o ETH.
+    /// @param id Id do projeto.
+    // [Recurso: Funcoes]
+    function sacar(uint256 id)
+        external
+        projetoExiste(id) // [Recurso: Modificadores]
+        apenasComunidadeDoProjeto(id) // [Recurso: Modificadores]
+        semReentrada // [Recurso: Modificadores]
+    {
+        // Checks
+        uint256 valor = disponivelParaSaque(id);
+        if (valor == 0) {
+            revert NadaASacar(); // [Recurso: EventosEErros]
+        }
+
+        // Effects
+        projetos[id].sacado += valor;
+        emit SaqueRealizado(id, msg.sender, valor); // [Recurso: EventosEErros]
+
+        // Interactions
+        _transferir(payable(msg.sender), valor);
+    }
+
+    /// @dev Envia ETH com call{value:} e reverte se a transferencia falhar.
+    // [Recurso: Funcoes]
+    function _transferir(address payable para, uint256 valor) private {
+        (bool ok, ) = para.call{value: valor}("");
+        if (!ok) {
+            revert TransferenciaFalhou(para, valor); // [Recurso: EventosEErros]
+        }
     }
 
     /// @dev Valida os textos, numeros e duracoes de um novo projeto.
