@@ -39,6 +39,7 @@ const estado = {
   totalApoiado: 0n,  // totalApoiadoPor(conta): soma bruta, nunca reduzida por reembolsos
   naSepolia: false,  // a carteira está na Sepolia?
   txPendente: false, // há uma transação aguardando confirmação?
+  filtro: "todos",   // etapa escolhida nos filtros da lista de projetos ("todos" ou número do status)
 };
 
 // Atalho para buscar elementos pelo id.
@@ -520,9 +521,28 @@ function htmlCard(p) {
     </article>`;
 }
 
+// Botões de filtro por etapa, com a contagem de projetos em cada uma.
+function renderizarFiltros() {
+  const caixa = $("filtros");
+  if (!estado.projetos.length) {
+    caixa.innerHTML = "";
+    return;
+  }
+  const opcoes = [["todos", "Todos"], ...NOMES_STATUS.map((nome, i) => [String(i), nome])];
+  caixa.innerHTML = opcoes.map(([valor, nome]) => {
+    const qtd = valor === "todos"
+      ? estado.projetos.length
+      : estado.projetos.filter((p) => p.status === Number(valor)).length;
+    const ativo = estado.filtro === valor;
+    if (!qtd && valor !== "todos" && !ativo) return ""; // esconde etapas vazias (menos a escolhida)
+    return `<button type="button" class="filtro" data-filtro="${valor}" aria-pressed="${ativo}">${nome}<span>${qtd}</span></button>`;
+  }).join("");
+}
+
 function renderizarProjetos() {
   const lista = $("lista-projetos");
   const msg = mensagemVazia();
+  renderizarFiltros();
   if (contratoConfigurado() && !estado.web3) {
     // Sem carteira: mensagem com link para instalar a MetaMask.
     const p = document.createElement("p");
@@ -534,8 +554,14 @@ function renderizarProjetos() {
   } else if (!estado.projetos.length) {
     lista.innerHTML = '<p class="vazio">Nenhum projeto ainda. Comunidades cadastradas podem criar o primeiro.</p>';
   } else {
+    const visiveis = estado.filtro === "todos"
+      ? estado.projetos
+      : estado.projetos.filter((p) => p.status === Number(estado.filtro));
     // Mais recentes primeiro.
-    renderizarPreservando(lista, estado.projetos.slice().reverse().map(htmlCard).join(""));
+    const ordenados = visiveis.slice().reverse();
+    renderizarPreservando(lista, ordenados.length
+      ? ordenados.map(htmlCard).join("")
+      : '<p class="vazio">Nenhum projeto nesta etapa.</p>');
   }
 }
 
@@ -667,6 +693,10 @@ function renderizarPaineis() {
   renderizarPainelComunidade();
   renderizarMeusApoios();
   renderizarPainelDono();
+  // Os links do menu seguem a visibilidade das seções (só aparece o que a conta pode usar).
+  document.querySelectorAll("[data-nav]").forEach((link) => {
+    link.hidden = $(link.dataset.nav).hidden;
+  });
   atualizarContagens();
   // Se há transação em andamento, os botões recém-desenhados já nascem bloqueados.
   bloquearAcoes(estado.txPendente);
@@ -1150,6 +1180,14 @@ function ligarAcoes() {
   document.addEventListener("click", (e) => {
     const botao = e.target.closest("button[data-acao]");
     if (botao) executarAcao(botao.dataset.acao, botao.dataset.id, botao);
+    // Filtros da lista de projetos: só redesenham a lista (não leem a blockchain).
+    const filtro = e.target.closest("button[data-filtro]");
+    if (filtro) {
+      estado.filtro = filtro.dataset.filtro;
+      renderizarProjetos();
+      atualizarContagens();
+      bloquearAcoes(estado.txPendente);
+    }
   });
   document.addEventListener("change", (e) => {
     if (e.target.matches('input[type="file"][data-acao]')) {

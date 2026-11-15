@@ -321,6 +321,21 @@ main { max-width: var(--largura); margin: 0 auto; padding: 0 16px 5rem; }
 .secao-nota { color: var(--nevoa-suave); font-size: 0.95rem; margin: 0.6rem 0 1.6rem; }
 .vazio { color: var(--nevoa-suave); }
 
+.filtros { display: flex; flex-wrap: wrap; gap: 0.2rem 1.25rem; }
+.filtro {
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.15rem 0 0.25rem;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  color: var(--nevoa-suave);
+  cursor: pointer;
+}
+.filtro:hover { color: var(--nevoa); }
+.filtro[aria-pressed="true"] { color: var(--nevoa); border-bottom-color: var(--ouro); }
+.filtro span { margin-left: 0.3rem; color: var(--nevoa-fraca); font-variant-numeric: tabular-nums; }
+
 /* ---------- Cards de projeto ---------- */
 
 .grade-projetos {
