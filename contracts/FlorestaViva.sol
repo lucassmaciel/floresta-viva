@@ -1,0 +1,248 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+/// @title FlorestaViva
+/// @notice Financiamento coletivo de reflorestamento: apoiadores enviam ETH a projetos de
+///         comunidades cadastradas e o dinheiro e liberado conforme o plantio e comprovado.
+/// @dev Arquivo unico, sem imports, para ser colado direto no Remix IDE.
+contract FlorestaViva {
+    // ------------------------------------------------------------------
+    // Tipos: enum e structs
+    // ------------------------------------------------------------------
+
+    /// @notice Ciclo de vida de um projeto. Verificado e Cancelado sao estados finais.
+    // [Recurso: StructsEEnums]
+    enum Status { Captando, Financiado, Plantado, Verificado, Cancelado }
+
+    /// @notice Dados completos de um projeto de reflorestamento.
+    // [Recurso: StructsEEnums]
+    struct Projeto {
+        uint256 id;
+        address payable comunidade;
+        string titulo;
+        string local;                       // ex.: "Manacapuru - AM"
+        uint256 quantidadeMudas;
+        uint256 meta;                       // em wei
+        uint256 arrecadado;
+        uint256 sacado;
+        uint256 saldoReembolsavel;          // gravado no cancelamento
+        uint256 prazoCaptacao;              // timestamp
+        uint256 duracaoPlantio;             // segundos, informado na criacao
+        uint256 prazoPlantio;               // timestamp, definido ao financiar
+        uint256 prazoVerificacao;           // timestamp, definido ao registrar o plantio
+        uint256 contribuicoesReembolsadas;  // soma das contribuicoes ja reembolsadas
+        uint256 totalReembolsado;           // wei ja devolvidos
+        bytes32 provaPlantio;               // keccak256 do arquivo de prova
+        Status status;
+    }
+
+    /// @notice Dados de uma comunidade cadastrada pelo dono.
+    // [Recurso: StructsEEnums]
+    struct Comunidade {
+        string nome;
+        bool cadastrada;        // true para sempre depois do primeiro cadastro
+        bool ativa;             // false impede apenas a criacao de novos projetos
+        int256 reputacao;       // pode ficar negativa
+        uint256[] projetos;     // ids dos projetos da comunidade
+    }
+
+    // ------------------------------------------------------------------
+    // Constantes, imutaveis e estado
+    // ------------------------------------------------------------------
+
+    // [Recurso: TiposDeDados]
+    uint256 public constant PERCENTUAL_PRIMEIRA_PARCELA = 50;
+    uint256 public constant MAX_PROJETOS_ATIVOS = 3;
+    uint256 public constant MAX_PROJETOS_POR_COMUNIDADE = 20;
+    int256 public constant REPUTACAO_MINIMA = -2;
+    uint256 public constant MAX_DURACAO_MIN = 525_600; // 1 ano, em minutos
+    uint256 public constant MAX_TEXTO = 80;
+
+    /// @notice Quem implantou o contrato; cadastra comunidades e verifica plantios.
+    // [Recurso: TiposDeDados]
+    address payable public immutable dono;
+
+    /// @notice Tempo (segundos) que o dono tem para verificar um plantio registrado.
+    // [Recurso: TiposDeDados]
+    uint256 public immutable prazoVerificacaoSeg;
+
+    /// @dev Lista de todos os projetos; o id de cada projeto e a sua posicao no array.
+    // [Recurso: ArraysEMappings]
+    Projeto[] private projetos;
+
+    /// @notice Comunidades por endereco (o getter devolve nome, cadastrada, ativa e reputacao).
+    // [Recurso: ArraysEMappings]
+    mapping(address => Comunidade) public comunidades;
+
+    /// @dev Trava usada pelo modificador semReentrada.
+    // [Recurso: TiposDeDados]
+    bool private travado;
+
+    // ------------------------------------------------------------------
+    // Eventos
+    // ------------------------------------------------------------------
+
+    // [Recurso: EventosEErros]
+    event ComunidadeCadastrada(address indexed conta, string nome);
+    event ComunidadeDesativada(address indexed conta);
+    event ProjetoCriado(
+        uint256 indexed id,
+        address indexed comunidade,
+        string titulo,
+        uint256 meta,
+        uint256 prazoCaptacao
+    );
+    event ApoioRecebido(uint256 indexed id, address indexed apoiador, uint256 valor);
+    event ProjetoFinanciado(uint256 indexed id, uint256 arrecadado, uint256 prazoPlantio);
+    event PlantioRegistrado(uint256 indexed id, bytes32 prova);
+    event PlantioVerificado(uint256 indexed id, address indexed verificador);
+    event ProjetoCancelado(uint256 indexed id, string motivo, uint256 saldoReembolsavel);
+    event SaqueRealizado(uint256 indexed id, address indexed comunidade, uint256 valor);
+    event ReembolsoRealizado(uint256 indexed id, address indexed apoiador, uint256 valor);
+
+    // ------------------------------------------------------------------
+    // Erros personalizados
+    // ------------------------------------------------------------------
+
+    // [Recurso: EventosEErros]
+    error NaoAutorizado(address chamador);
+    error ProjetoInexistente(uint256 id);
+    error EstadoInvalido(uint256 id, Status atual, Status esperado);
+    error PrazoNaoEncerrado(uint256 agora, uint256 prazo);
+    error PrazoEncerrado(uint256 prazo);
+    error ValorInvalido();
+    error NadaASacar();
+    error NadaAReembolsar();
+    error ReputacaoInsuficiente(int256 atual);
+    error LimiteDeProjetosAtingido(uint256 limite);
+    error TransferenciaFalhou(address para, uint256 valor);
+
+    // ------------------------------------------------------------------
+    // Modificadores
+    // ------------------------------------------------------------------
+
+    /// @dev So o dono do contrato pode continuar.
+    // [Recurso: Modificadores]
+    modifier apenasDono() {
+        if (msg.sender != dono) {
+            revert NaoAutorizado(msg.sender); // [Recurso: EventosEErros]
+        }
+        _;
+    }
+
+    /// @dev So uma comunidade cadastrada e ativa pode continuar.
+    // [Recurso: Modificadores]
+    modifier apenasComunidadeAtiva() {
+        if (!comunidades[msg.sender].ativa) {
+            revert NaoAutorizado(msg.sender); // [Recurso: EventosEErros]
+        }
+        _;
+    }
+
+    /// @dev So a comunidade dona do projeto `id` pode continuar (nao exige estar ativa).
+    // [Recurso: Modificadores]
+    modifier apenasComunidadeDoProjeto(uint256 id) {
+        if (id >= projetos.length) {
+            revert ProjetoInexistente(id); // [Recurso: EventosEErros]
+        }
+        if (projetos[id].comunidade != msg.sender) {
+            revert NaoAutorizado(msg.sender); // [Recurso: EventosEErros]
+        }
+        _;
+    }
+
+    /// @dev O projeto `id` precisa existir.
+    // [Recurso: Modificadores]
+    modifier projetoExiste(uint256 id) {
+        if (id >= projetos.length) {
+            revert ProjetoInexistente(id); // [Recurso: EventosEErros]
+        }
+        _;
+    }
+
+    /// @dev O projeto `id` precisa estar no estado `esperado`.
+    // [Recurso: Modificadores]
+    modifier noEstado(uint256 id, Status esperado) {
+        if (projetos[id].status != esperado) {
+            revert EstadoInvalido(id, projetos[id].status, esperado); // [Recurso: EventosEErros]
+        }
+        _;
+    }
+
+    /// @dev Impede reentrada: a funcao nao pode ser chamada de novo enquanto executa.
+    // [Recurso: Modificadores]
+    modifier semReentrada() {
+        require(!travado, "Reentrada bloqueada"); // [Recurso: EstruturasDeControle]
+        travado = true;
+        _;
+        travado = false;
+    }
+
+    // ------------------------------------------------------------------
+    // Construtor
+    // ------------------------------------------------------------------
+
+    /// @notice Implanta o contrato; quem implanta vira o dono.
+    /// @param prazoVerificacaoMin Prazo (em minutos) para o dono verificar um plantio.
+    // [Recurso: Funcoes]
+    constructor(uint256 prazoVerificacaoMin) {
+        require(
+            prazoVerificacaoMin > 0 && prazoVerificacaoMin <= MAX_DURACAO_MIN,
+            "Prazo de verificacao invalido"
+        ); // [Recurso: EstruturasDeControle]
+        dono = payable(msg.sender);
+        prazoVerificacaoSeg = prazoVerificacaoMin * 1 minutes;
+    }
+
+    // ------------------------------------------------------------------
+    // Comunidades
+    // ------------------------------------------------------------------
+
+    /// @notice Cadastra uma comunidade. Se ja existir, apenas reativa e atualiza o nome,
+    ///         mantendo reputacao e historico.
+    /// @param conta Endereco que recebera o dinheiro da comunidade.
+    /// @param nome Nome da comunidade (nao vazio, ate MAX_TEXTO bytes).
+    // [Recurso: Funcoes]
+    function cadastrarComunidade(address payable conta, string calldata nome)
+        external
+        apenasDono // [Recurso: Modificadores]
+    {
+        require(conta != address(0), "Endereco invalido");
+        require(conta != dono, "O dono nao pode ser comunidade");
+        require(bytes(nome).length > 0, "Nome vazio");
+        require(bytes(nome).length <= MAX_TEXTO, "Nome muito longo");
+
+        Comunidade storage c = comunidades[conta];
+        if (c.cadastrada) {
+            // Ja existia: so reativa e atualiza o nome (reputacao e projetos ficam).
+            c.ativa = true;
+            c.nome = nome;
+        } else {
+            c.nome = nome;
+            c.cadastrada = true;
+            c.ativa = true;
+        } // [Recurso: EstruturasDeControle]
+
+        emit ComunidadeCadastrada(conta, nome); // [Recurso: EventosEErros]
+    }
+
+    /// @notice Impede que a comunidade crie NOVOS projetos; os existentes seguem normalmente.
+    /// @param conta Endereco da comunidade.
+    // [Recurso: Funcoes]
+    function desativarComunidade(address conta)
+        external
+        apenasDono // [Recurso: Modificadores]
+    {
+        require(comunidades[conta].cadastrada, "Comunidade nao cadastrada");
+        comunidades[conta].ativa = false;
+        emit ComunidadeDesativada(conta); // [Recurso: EventosEErros]
+    }
+
+    /// @notice Lista os ids dos projetos de uma comunidade.
+    /// @param conta Endereco da comunidade.
+    /// @return ids Ids dos projetos criados por ela.
+    // [Recurso: Funcoes]
+    function projetosDaComunidade(address conta) external view returns (uint256[] memory ids) {
+        return comunidades[conta].projetos;
+    }
+}
