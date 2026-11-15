@@ -6,8 +6,10 @@
 //   3. Conexão com a carteira
 //   4. Rede (Sepolia)
 //   5. Papéis (dono / comunidade)
-//   6. Orquestração da tela (atualizarTudo)
-//   7. Inicialização e eventos da carteira
+//   6. Leitura de projetos, apoios e histórico (somente leitura, .call())
+//   7. Renderização (totais, cards, painéis por papel, histórico)
+//   8. Orquestração da tela (atualizarTudo)
+//   9. Inicialização, contagem regressiva e eventos da carteira
 
 // ---------------------------------------------------------------------------
 // 1. Constantes e estado
@@ -32,7 +34,9 @@ const estado = {
   dono: null,        // endereço do dono (verificador), lido de dono()
   ehDono: false,     // a conta conectada é o dono?
   comunidade: null,  // { nome, ativa, reputacao (BigInt) } se a conta é comunidade cadastrada
-  projetos: [],      // preenchido na tarefa de projetos
+  projetos: [],      // lista normalizada, preenchida por carregarProjetos()
+  totalApoiado: 0n,  // totalApoiadoPor(conta): soma bruta, nunca reduzida por reembolsos
+  naSepolia: false,  // a carteira está na Sepolia?
   txPendente: false, // há uma transação aguardando confirmação?
 };
 
@@ -53,9 +57,41 @@ function formatarEth(wei) {
 }
 
 // "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" -> "0xf39F…2266"
+// Endereços são mostrados em formato checksum (maiúsculas/minúsculas validam o endereço).
+// Hashes (bytes32) não são endereços e só são abreviados.
 function abreviar(endereco) {
-  return `${endereco.slice(0, 6)}…${endereco.slice(-4)}`;
+  let texto = String(endereco);
+  try {
+    if (estado.web3 && estado.web3.utils.isAddress(texto)) {
+      texto = estado.web3.utils.toChecksumAddress(texto);
+    }
+  } catch (e) { /* mantém o texto original */ }
+  return `${texto.slice(0, 6)}…${texto.slice(-4)}`;
 }
+
+// Escapa texto vindo do contrato (título, local, nome, motivo) antes de entrar em innerHTML.
+// Esses campos são digitados por usuários, então nunca podem virar HTML.
+function esc(valor) {
+  return String(valor)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Segundos -> "2d 03:04:05" ou "03:04:05".
+function formatarDuracao(segundos) {
+  const t = Math.max(0, Math.floor(segundos));
+  const d = Math.floor(t / 86400);
+  const h = String(Math.floor((t % 86400) / 3600)).padStart(2, "0");
+  const m = String(Math.floor((t % 3600) / 60)).padStart(2, "0");
+  const s = String(t % 60).padStart(2, "0");
+  return (d > 0 ? `${d}d ` : "") + `${h}:${m}:${s}`;
+}
+
+const agora = () => Math.floor(Date.now() / 1000);
+const linkTx = (hash) => `${SEPOLIA.explorer}/tx/${hash}`;
 
 // Mostra uma mensagem na faixa de avisos. tipo: "info" (padrão), "erro" ou "sucesso".
 // Texto vazio esconde a faixa.
@@ -77,6 +113,9 @@ const contratoConfigurado = () =>
 // 3. Conexão com a carteira
 // ---------------------------------------------------------------------------
 
+// Erro -32002 da MetaMask: já existe um pop-up aberto esperando resposta.
+const MSG_PEDIDO_PENDENTE = "Já existe um pedido pendente: abra a MetaMask.";
+
 // Pede acesso às contas (abre a MetaMask). Chamada pelo botão "Conectar carteira".
 async function conectarCarteira() {
   if (!window.ethereum) {
@@ -89,6 +128,7 @@ async function conectarCarteira() {
   } catch (e) {
     // Erro 4001 = usuário recusou no pop-up da carteira.
     if (e && e.code === 4001) mostrarAviso("Conexão recusada na carteira.", "erro");
+    else if (e && e.code === -32002) mostrarAviso(MSG_PEDIDO_PENDENTE, "erro");
     else mostrarAviso("Não foi possível conectar a carteira.", "erro");
     return;
   }
@@ -114,7 +154,9 @@ async function trocarParaSepolia() {
       params: [{ chainId: SEPOLIA.chainId }],
     });
   } catch (e) {
-    if (e && e.code === 4902) {
+    // Algumas versões da MetaMask escondem o 4902 em e.data.originalError.code.
+    const codigo = e && (e.code === 4902 ? 4902 : e.data?.originalError?.code);
+    if (codigo === 4902) {
       try {
         await window.ethereum.request({
           method: "wallet_addEthereumChain",
@@ -127,10 +169,13 @@ async function trocarParaSepolia() {
           }],
         });
       } catch (e2) {
-        mostrarAviso("Não foi possível adicionar a rede Sepolia.", "erro");
+        if (e2 && e2.code === -32002) mostrarAviso(MSG_PEDIDO_PENDENTE, "erro");
+        else mostrarAviso("Não foi possível adicionar a rede Sepolia.", "erro");
       }
     } else if (e && e.code === 4001) {
       mostrarAviso("Troca de rede recusada na carteira.", "erro");
+    } else if (e && e.code === -32002) {
+      mostrarAviso(MSG_PEDIDO_PENDENTE, "erro");
     } else {
       mostrarAviso("Não foi possível trocar para a Sepolia.", "erro");
     }
@@ -160,34 +205,402 @@ async function carregarPapel() {
   }
 }
 
+
 // ---------------------------------------------------------------------------
-// 6. Orquestração da tela
+// 6. Leitura de projetos, apoios e histórico (somente leitura: .call())
 // ---------------------------------------------------------------------------
+
+const NOMES_STATUS = ["Captando", "Financiado", "Plantado", "Verificado", "Cancelado"];
+const STATUS = { CAPTANDO: 0, FINANCIADO: 1, PLANTADO: 2, VERIFICADO: 3, CANCELADO: 4 };
+
+// Lê todos os projetos da blockchain e guarda em estado.projetos.
+// Para cada projeto também lê o que a conta conectada pode sacar/reembolsar/já apoiou.
+async function carregarProjetos() {
+  const m = estado.contrato.methods;
+  const conta = estado.conta;
+  const total = Number(await m.totalProjetos().call());
+
+  // Lê os projetos em paralelo (um Promise por projeto) para a tela carregar rápido.
+  const ids = Array.from({ length: total }, (_, i) => i);
+  const lista = await Promise.all(ids.map(async (i) => {
+    const p = await m.obterProjeto(i).call();
+    const disponivel = BigInt(await m.disponivelParaSaque(i).call());
+    let reembolsavel = 0n;
+    let contribuicao = 0n;
+    if (conta) {
+      reembolsavel = BigInt(await m.valorReembolsavel(i, conta).call());
+      contribuicao = BigInt(await m.contribuicoes(i, conta).call());
+    }
+    // Normaliza: uint256 vira BigInt, status vira Number, o resto fica como texto.
+    return {
+      id: i,
+      comunidade: p.comunidade,
+      titulo: p.titulo,
+      local: p.local,
+      mudas: BigInt(p.quantidadeMudas),
+      meta: BigInt(p.meta),
+      arrecadado: BigInt(p.arrecadado),
+      prazoCaptacao: Number(p.prazoCaptacao),
+      prazoPlantio: Number(p.prazoPlantio),
+      prazoVerificacao: Number(p.prazoVerificacao),
+      prova: p.provaPlantio,
+      status: Number(p.status),
+      disponivel,
+      reembolsavel,
+      contribuicao,
+    };
+  }));
+
+  estado.projetos = lista;
+  // totalApoiadoPor é bruto: reembolsos NÃO o reduzem (por isso o rótulo "Total já apoiado").
+  estado.totalApoiado = conta ? BigInt(await m.totalApoiadoPor(conta).call()) : 0n;
+}
+
+// Frase em português para cada evento do contrato (usada no histórico).
+function frase(ev) {
+  const v = ev.returnValues;
+  const ator = (a) => `<strong>${esc(abreviar(a))}</strong>`;
+  switch (ev.event) {
+    case "ComunidadeCadastrada":
+      return `${ator(v.conta)} foi cadastrada como comunidade “${esc(v.nome)}”`;
+    case "ComunidadeDesativada":
+      return `${ator(v.conta)} foi desativada como comunidade`;
+    case "ProjetoCriado":
+      return `${ator(v.comunidade)} criou o projeto #${v.id} “${esc(v.titulo)}” (meta ${formatarEth(BigInt(v.meta))} ETH)`;
+    case "ApoioRecebido":
+      return `${ator(v.apoiador)} apoiou o projeto #${v.id} com ${formatarEth(BigInt(v.valor))} ETH`;
+    case "ProjetoFinanciado":
+      return `O projeto #${v.id} atingiu a meta (${formatarEth(BigInt(v.arrecadado))} ETH) e foi financiado`;
+    case "PlantioRegistrado":
+      return `Plantio registrado no projeto #${v.id} (prova ${esc(abreviar(v.prova))})`;
+    case "PlantioVerificado":
+      return `${ator(v.verificador)} verificou o plantio do projeto #${v.id}`;
+    case "ProjetoCancelado":
+      return `O projeto #${v.id} foi cancelado: “${esc(v.motivo)}” (${formatarEth(BigInt(v.saldoReembolsavel))} ETH reembolsáveis)`;
+    case "SaqueRealizado":
+      return `${ator(v.comunidade)} sacou ${formatarEth(BigInt(v.valor))} ETH do projeto #${v.id}`;
+    case "ReembolsoRealizado":
+      return `${ator(v.apoiador)} recebeu reembolso de ${formatarEth(BigInt(v.valor))} ETH do projeto #${v.id}`;
+    default:
+      return esc(ev.event || "Evento");
+  }
+}
+
+// Lê os eventos desde o bloco do deploy e mostra os mais recentes primeiro.
+// Se falhar, só esta seção mostra "Histórico indisponível"; o resto da tela segue normal.
+// "versao" evita que uma leitura antiga sobrescreva uma atualização mais nova.
+async function carregarHistorico(versao = versaoAtualizacao) {
+  const ul = $("historico");
+  try {
+    const eventos = await estado.contrato.getPastEvents("allEvents", {
+      fromBlock: CONTRATO.blocoDeploy,
+      toBlock: "latest",
+    });
+    if (versao !== versaoAtualizacao) return;
+    eventos.sort((a, b) =>
+      Number(b.blockNumber) - Number(a.blockNumber) || Number(b.logIndex) - Number(a.logIndex));
+    if (!eventos.length) {
+      ul.innerHTML = '<li class="vazio">Nenhum evento ainda.</li>';
+      return;
+    }
+    ul.innerHTML = eventos.map((ev) =>
+      `<li>${frase(ev)} <a href="${linkTx(ev.transactionHash)}" target="_blank" rel="noopener">ver transação ↗</a></li>`
+    ).join("");
+  } catch (e) {
+    console.error(e);
+    if (versao === versaoAtualizacao) ul.innerHTML = '<li class="vazio">Histórico indisponível</li>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Renderização
+// ---------------------------------------------------------------------------
+
+// Redesenhar com innerHTML apagaria o que o usuário está digitando (a tela atualiza
+// sozinha a cada 15 s). Este auxiliar guarda os campos marcados com data-campo e
+// devolve os valores depois de redesenhar. (Campos de arquivo não podem ser restaurados.)
+function renderizarPreservando(raiz, html) {
+  const salvo = {};
+  raiz.querySelectorAll("[data-campo]").forEach((el) => {
+    if (el.type !== "file") salvo[el.dataset.campo] = el.value;
+  });
+  raiz.innerHTML = html;
+  raiz.querySelectorAll("[data-campo]").forEach((el) => {
+    if (el.type !== "file" && salvo[el.dataset.campo] !== undefined) el.value = salvo[el.dataset.campo];
+  });
+}
+
+// Prazo (timestamp) do estado atual do projeto + rótulo, ou null se o estado é final.
+function prazoAtual(p) {
+  if (p.status === STATUS.CAPTANDO) return { ts: p.prazoCaptacao, rotulo: "Captação termina em" };
+  if (p.status === STATUS.FINANCIADO) return { ts: p.prazoPlantio, rotulo: "Prazo de plantio termina em" };
+  if (p.status === STATUS.PLANTADO) return { ts: p.prazoVerificacao, rotulo: "Prazo de verificação termina em" };
+  return null;
+}
+
+// Mensagem quando não há o que listar (sem contrato, rede errada, sem projetos).
+function mensagemVazia() {
+  if (!contratoConfigurado()) return "Contrato não configurado.";
+  if (!estado.web3) return "Instale a MetaMask para ver os projetos.";
+  if (!estado.naSepolia) return "Conecte-se à rede Sepolia para ver os projetos.";
+  return "";
+}
+
+// "1 projeto · 0,0000 ETH arrecadados · 500 mudas"
+function renderizarTotais() {
+  const caixa = $("totais");
+  if (!estado.projetos.length) {
+    caixa.textContent = "";
+    return;
+  }
+  const n = estado.projetos.length;
+  const eth = estado.projetos.reduce((soma, p) => soma + p.arrecadado, 0n);
+  const mudas = estado.projetos.reduce((soma, p) => soma + p.mudas, 0n);
+  caixa.textContent =
+    `${n} ${n === 1 ? "projeto" : "projetos"} · ${formatarEth(eth)} ETH arrecadados · ` +
+    `${Number(mudas).toLocaleString("pt-BR")} mudas`;
+}
+
+// Botões e campos do card conforme o estado do projeto e o papel da conta.
+// Os cliques são tratados na tarefa seguinte (data-acao + data-id).
+// Elementos com data-apos / data-ate aparecem/somem sozinhos quando o prazo passa
+// (a contagem regressiva do item 9 faz isso a cada segundo, sem reler a blockchain).
+function acoesDoProjeto(p) {
+  const partes = [];
+  const sou = estado.conta && p.comunidade.toLowerCase() === estado.conta.toLowerCase();
+  const prazo = prazoAtual(p);
+  const btnEncerrar = `<button type="button" class="btn btn-secundario" data-acao="encerrar" data-id="${p.id}" data-apos="${prazo ? prazo.ts : 0}">Encerrar projeto</button>`;
+
+  if (p.status === STATUS.CAPTANDO) {
+    if (estado.conta) {
+      partes.push(
+        `<span data-ate="${p.prazoCaptacao}">` +
+        `<input type="number" min="0" step="0.001" value="0.01" size="6" aria-label="Valor em ETH" data-campo="valor-${p.id}"> ETH ` +
+        `<button type="button" class="btn" data-acao="apoiar" data-id="${p.id}">Apoiar</button></span>`
+      );
+    } else {
+      partes.push(`<span class="vazio" data-ate="${p.prazoCaptacao}">Conecte a carteira para apoiar.</span>`);
+    }
+    partes.push(btnEncerrar);
+  } else if (p.status === STATUS.FINANCIADO) {
+    if (sou) {
+      partes.push(
+        `<label data-ate="${p.prazoPlantio}">Prova do plantio (foto/laudo) ` +
+        `<input type="file" data-acao="registrar-plantio" data-id="${p.id}"></label>`
+      );
+    }
+    partes.push(btnEncerrar);
+  } else if (p.status === STATUS.PLANTADO) {
+    partes.push(btnEncerrar);
+  }
+
+  // Sacar: só a comunidade dona do projeto, quando há valor liberado.
+  if (sou && p.disponivel > 0n) {
+    partes.push(`<button type="button" class="btn" data-acao="sacar" data-id="${p.id}">Sacar ${formatarEth(p.disponivel)} ETH</button>`);
+  }
+  // Reembolsar: qualquer apoiador de projeto cancelado com valor a receber.
+  if (p.status === STATUS.CANCELADO && p.reembolsavel > 0n) {
+    partes.push(`<button type="button" class="btn" data-acao="reembolsar" data-id="${p.id}">Reembolsar ${formatarEth(p.reembolsavel)} ETH</button>`);
+  }
+  return partes.join("");
+}
+
+function htmlCard(p) {
+  const pct = p.meta > 0n ? Number((p.arrecadado * 100n) / p.meta) : 0;
+  const nomeStatus = NOMES_STATUS[p.status] || "?";
+  const prazo = prazoAtual(p);
+  const temProva = p.prova && !/^0x0+$/.test(p.prova);
+  return `
+    <article class="card">
+      <h3>${esc(p.titulo)} <small>#${p.id}</small></h3>
+      <div class="local">📍 ${esc(p.local)} · ${Number(p.mudas).toLocaleString("pt-BR")} mudas</div>
+      <div><span class="selo status-${nomeStatus.toLowerCase()}">${nomeStatus}</span></div>
+      <div class="barra" role="progressbar" aria-valuenow="${Math.min(pct, 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${Math.min(pct, 100)}%"></span></div>
+      <div>${formatarEth(p.arrecadado)} / ${formatarEth(p.meta)} ETH (${pct}%)</div>
+      ${prazo ? `<div class="prazo">⏳ ${prazo.rotulo}: <span class="contagem" data-prazo="${prazo.ts}">…</span></div>` : ""}
+      ${temProva ? `<div class="prova" title="${esc(p.prova)}">Prova do plantio: <code>${esc(abreviar(p.prova))}</code></div>` : ""}
+      <div class="acoes">${acoesDoProjeto(p)}</div>
+    </article>`;
+}
+
+function renderizarProjetos() {
+  const lista = $("lista-projetos");
+  const msg = mensagemVazia();
+  if (msg) {
+    lista.innerHTML = `<p class="vazio">${msg}</p>`;
+  } else if (!estado.projetos.length) {
+    lista.innerHTML = '<p class="vazio">Nenhum projeto ainda.</p>';
+  } else {
+    renderizarPreservando(lista, estado.projetos.map(htmlCard).join(""));
+  }
+}
+
+// Painel da comunidade: reputação, formulário de criação e lista dos projetos próprios.
+function renderizarPainelComunidade() {
+  const painel = $("painel-comunidade");
+  const c = estado.comunidade;
+  if (!c) {
+    painel.innerHTML = "<h2>Minha comunidade</h2>";
+    return;
+  }
+  const meus = estado.projetos.filter((p) => p.comunidade.toLowerCase() === estado.conta.toLowerCase());
+  const form = c.ativa
+    ? `<form class="formulario" data-acao="criar-projeto">
+         <h3>Criar projeto</h3>
+         <input required maxlength="80" placeholder="Título" data-campo="cp-titulo" aria-label="Título">
+         <input required maxlength="80" placeholder="Local (ex.: Manacapuru - AM)" data-campo="cp-local" aria-label="Local">
+         <input required type="number" min="1" step="1" placeholder="Mudas" data-campo="cp-mudas" aria-label="Quantidade de mudas">
+         <input required type="number" min="0" step="0.001" placeholder="Meta (ETH)" data-campo="cp-meta" aria-label="Meta em ETH">
+         <input required type="number" min="1" step="1" placeholder="Captação (min)" data-campo="cp-captacao" aria-label="Duração da captação em minutos">
+         <input required type="number" min="1" step="1" placeholder="Plantio (min)" data-campo="cp-plantio" aria-label="Prazo de plantio em minutos">
+         <button type="submit" class="btn">Criar projeto</button>
+       </form>`
+    : '<p class="aviso-inline">Sua comunidade está desativada: não pode criar novos projetos.</p>';
+  const itens = meus.length
+    ? meus.map((p) =>
+        `<li>#${p.id} ${esc(p.titulo)} <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span> · ${formatarEth(p.arrecadado)} / ${formatarEth(p.meta)} ETH</li>`
+      ).join("")
+    : '<li class="vazio">Você ainda não criou projetos.</li>';
+  renderizarPreservando(painel, `
+    <h2>Minha comunidade</h2>
+    <p><strong>${esc(c.nome)}</strong> · reputação: <strong>${c.reputacao.toString()}</strong>
+       ${c.ativa ? "" : "· <em>desativada</em>"}</p>
+    ${form}
+    <h3>Meus projetos</h3>
+    <ul class="lista-simples">${itens}</ul>`);
+}
+
+// Meus apoios: total já apoiado, contribuições por projeto e reembolsos disponíveis.
+function renderizarMeusApoios() {
+  const painel = $("meus-apoios");
+  painel.hidden = !estado.conta || !estado.naSepolia;
+  if (painel.hidden) return;
+  const apoios = estado.projetos.filter((p) => p.contribuicao > 0n);
+  const itens = apoios.length
+    ? apoios.map((p) =>
+        `<li>#${p.id} ${esc(p.titulo)} — ${formatarEth(p.contribuicao)} ETH
+           <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span>
+           ${p.reembolsavel > 0n
+             ? `<button type="button" class="btn" data-acao="reembolsar" data-id="${p.id}">Reembolsar ${formatarEth(p.reembolsavel)} ETH</button>`
+             : ""}</li>`
+      ).join("")
+    : '<li class="vazio">Você ainda não apoiou nenhum projeto.</li>';
+  painel.innerHTML = `
+    <h2>Meus apoios</h2>
+    <p>Total já apoiado: <strong>${formatarEth(estado.totalApoiado)} ETH</strong>
+       <small class="vazio">(soma bruta: não diminui quando você é reembolsado)</small></p>
+    <ul class="lista-simples">${itens}</ul>`;
+}
+
+// Painel do verificador (dono): cadastrar/desativar comunidades, verificar/rejeitar, cancelar.
+function renderizarPainelDono() {
+  const painel = $("painel-dono");
+  if (!estado.ehDono) {
+    painel.innerHTML = "<h2>Painel do verificador</h2>";
+    return;
+  }
+  const t = agora();
+  // Plantados: o dono verifica ou rejeita enquanto o prazo de verificação está aberto.
+  const plantados = estado.projetos.filter((p) => p.status === STATUS.PLANTADO);
+  // Cancelamento direto (regras do contrato): Captando antes do prazo; Financiado após o prazo de plantio.
+  const cancelaveis = estado.projetos.filter((p) =>
+    (p.status === STATUS.CAPTANDO && t < p.prazoCaptacao) ||
+    (p.status === STATUS.FINANCIADO && t >= p.prazoPlantio));
+
+  const linhaPlantado = (p) => `
+    <li>#${p.id} ${esc(p.titulo)} · prova <code>${esc(abreviar(p.prova))}</code>
+      · <span class="contagem" data-prazo="${p.prazoVerificacao}">…</span>
+      <div class="acoes">
+        <button type="button" class="btn" data-acao="verificar" data-id="${p.id}">Verificar plantio</button>
+        <input placeholder="Motivo da rejeição" maxlength="120" data-campo="rej-${p.id}" aria-label="Motivo da rejeição">
+        <button type="button" class="btn btn-perigo" data-acao="rejeitar" data-id="${p.id}">Rejeitar prova</button>
+      </div></li>`;
+  const linhaCancelavel = (p) => `
+    <li>#${p.id} ${esc(p.titulo)} <span class="selo status-${NOMES_STATUS[p.status].toLowerCase()}">${NOMES_STATUS[p.status]}</span>
+      <div class="acoes">
+        <input placeholder="Motivo do cancelamento" maxlength="120" data-campo="can-${p.id}" aria-label="Motivo do cancelamento">
+        <button type="button" class="btn btn-perigo" data-acao="cancelar" data-id="${p.id}">Cancelar projeto</button>
+      </div></li>`;
+
+  renderizarPreservando(painel, `
+    <h2>Painel do verificador</h2>
+    <form class="formulario" data-acao="cadastrar-comunidade">
+      <h3>Cadastrar comunidade</h3>
+      <input required placeholder="Endereço 0x…" data-campo="cc-endereco" aria-label="Endereço da comunidade">
+      <input required maxlength="80" placeholder="Nome da comunidade" data-campo="cc-nome" aria-label="Nome da comunidade">
+      <button type="submit" class="btn">Cadastrar</button>
+    </form>
+    <form class="formulario" data-acao="desativar-comunidade">
+      <h3>Desativar comunidade</h3>
+      <input required placeholder="Endereço 0x…" data-campo="dc-endereco" aria-label="Endereço da comunidade">
+      <button type="submit" class="btn btn-perigo">Desativar</button>
+    </form>
+    <h3>Plantios aguardando verificação</h3>
+    <ul class="lista-simples">${plantados.length ? plantados.map(linhaPlantado).join("") : '<li class="vazio">Nenhum plantio aguardando.</li>'}</ul>
+    <h3>Cancelamento de projetos</h3>
+    <ul class="lista-simples">${cancelaveis.length ? cancelaveis.map(linhaCancelavel).join("") : '<li class="vazio">Nenhum projeto cancelável agora.</li>'}</ul>`);
+}
+
+// Mostra/esconde os painéis conforme o papel da conta e redesenha todo o conteúdo.
+function renderizarPaineis() {
+  $("painel-dono").hidden = !estado.ehDono;
+  $("painel-comunidade").hidden = !estado.comunidade;
+  renderizarTotais();
+  renderizarProjetos();
+  renderizarPainelComunidade();
+  renderizarMeusApoios();
+  renderizarPainelDono();
+  atualizarContagens();
+}
+
+// Contagem regressiva: roda a cada 1 s e só mexe no texto/visibilidade (não relê a blockchain).
+function atualizarContagens() {
+  const t = agora();
+  document.querySelectorAll(".contagem").forEach((el) => {
+    const restante = Number(el.dataset.prazo) - t;
+    el.textContent = restante > 0
+      ? formatarDuracao(restante)
+      : "prazo encerrado — pode ser encerrado por qualquer pessoa";
+  });
+  // Botões que só valem depois do prazo (encerrar) ou só até o prazo (apoiar, registrar prova).
+  document.querySelectorAll("[data-apos]").forEach((el) => { el.hidden = t < Number(el.dataset.apos); });
+  document.querySelectorAll("[data-ate]").forEach((el) => { el.hidden = t >= Number(el.dataset.ate); });
+}
+
+// ---------------------------------------------------------------------------
+// 8. Orquestração da tela
+// ---------------------------------------------------------------------------
+
+const MSG_ERRO_LEITURA = "Erro ao ler dados da blockchain. Tente novamente.";
 
 // Contador para descartar atualizações antigas se duas rodarem ao mesmo tempo
 // (ex.: o usuário troca de conta e de rede em sequência).
 let versaoAtualizacao = 0;
 
 // Único ponto que reconstrói a tela a partir da carteira e da blockchain.
-// Ordem: conexão -> rede -> papel -> (tarefas seguintes: projetos, histórico).
+// Ordem: conexão -> rede -> papel -> projetos -> histórico.
 async function atualizarTudo() {
   const versao = ++versaoAtualizacao;
   const obsoleta = () => versao !== versaoAtualizacao;
 
   // Sem carteira instalada: só o aviso.
   if (!window.ethereum) {
+    estado.projetos = [];
     renderizarCabecalho(false, false);
     renderizarPaineis();
     mostrarAviso("Instale a MetaMask para usar o Floresta Viva.", "erro");
     return;
   }
 
+  // Declaradas fora do try para o catch ainda conseguir redesenhar o cabeçalho.
+  let naSepolia = false;
+  let saldo = null;
   try {
-    const naSepolia = await verificarRede();
+    naSepolia = await verificarRede();
     if (obsoleta()) return;
+    estado.naSepolia = naSepolia;
 
     // Saldo da conta conectada (BigInt em wei).
-    let saldo = null;
     if (estado.conta) {
       saldo = await estado.web3.eth.getBalance(estado.conta);
       if (obsoleta()) return;
@@ -197,20 +610,33 @@ async function atualizarTudo() {
     estado.dono = null;
     estado.ehDono = false;
     estado.comunidade = null;
+    estado.projetos = [];
+    estado.totalApoiado = 0n;
+    // Uma leitura bem-sucedida apaga o aviso de erro antigo (inclusive em rede errada).
+    if ($("aviso-geral").textContent === MSG_ERRO_LEITURA) mostrarAviso("");
     if (!contratoConfigurado()) {
       mostrarAviso("Contrato não configurado: publique o contrato e preencha o endereço em contrato.js.", "erro");
     } else if (naSepolia) {
       mostrarAviso("");
       await carregarPapel();
       if (obsoleta()) return;
-      // Tarefas 8 e 9 adicionam aqui: carregar projetos, apoios e histórico.
+      await carregarProjetos();
+      if (obsoleta()) return;
     }
 
     renderizarCabecalho(naSepolia, true, saldo);
     renderizarPaineis();
+
+    // O histórico tem tratamento de erro próprio: se falhar, só ele avisa.
+    if (contratoConfigurado() && naSepolia) await carregarHistorico(versao);
+    else $("historico").innerHTML = '<li class="vazio">Conecte-se à Sepolia para ver o histórico.</li>';
   } catch (e) {
     console.error(e);
-    mostrarAviso("Erro ao ler dados da blockchain. Tente novamente.", "erro");
+    if (obsoleta()) return;
+    mostrarAviso(MSG_ERRO_LEITURA, "erro");
+    // Mesmo com erro, a tela reflete o que se sabe (conta, rede, papéis).
+    renderizarCabecalho(naSepolia, true, saldo);
+    renderizarPaineis();
   }
 }
 
@@ -239,15 +665,16 @@ function renderizarCabecalho(naSepolia, temCarteira, saldo) {
   }
 }
 
-// Mostra/esconde os painéis conforme o papel da conta.
-function renderizarPaineis() {
-  $("painel-dono").hidden = !estado.ehDono;
-  $("painel-comunidade").hidden = !estado.comunidade;
-}
+// ---------------------------------------------------------------------------
+// 9. Inicialização, contagem regressiva e eventos da carteira
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// 7. Inicialização e eventos da carteira
-// ---------------------------------------------------------------------------
+// O usuário está digitando ou escolheu um arquivo? Então a atualização automática espera.
+function usuarioEditando() {
+  const a = document.activeElement;
+  if (a && ["INPUT", "SELECT", "TEXTAREA"].includes(a.tagName)) return true;
+  return Array.from(document.querySelectorAll('input[type="file"]')).some((i) => i.files.length);
+}
 
 async function iniciar() {
   $("btn-conectar").addEventListener("click", conectarCarteira);
@@ -263,6 +690,14 @@ async function iniciar() {
     estado.contrato = new estado.web3.eth.Contract(CONTRATO.abi, CONTRATO.endereco);
   }
 
+  // Restaura a conexão sem pop-up: eth_accounts só devolve contas se o site já foi autorizado.
+  try {
+    const contas = await window.ethereum.request({ method: "eth_accounts" });
+    estado.conta = contas && contas.length ? contas[0] : null;
+  } catch (e) {
+    estado.conta = null;
+  }
+
   // Troca de conta na carteira: lista vazia = usuário desconectou.
   window.ethereum.on("accountsChanged", (contas) => {
     estado.conta = contas.length ? contas[0] : null;
@@ -271,8 +706,14 @@ async function iniciar() {
   // Troca de rede: atualiza sem recarregar a página.
   window.ethereum.on("chainChanged", () => atualizarTudo());
 
-  // A conexão só acontece quando o usuário clica em "Conectar carteira".
+  // Sem conta autorizada, a conexão só acontece no clique em "Conectar carteira".
   await atualizarTudo();
+
+  // Contagem regressiva a cada 1 s (só texto) e releitura leve da blockchain a cada 15 s.
+  setInterval(atualizarContagens, 1000);
+  setInterval(() => {
+    if (!document.hidden && !usuarioEditando()) atualizarTudo();
+  }, 15000);
 }
 
 iniciar();
