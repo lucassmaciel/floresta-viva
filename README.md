@@ -31,10 +31,13 @@ Papéis sugeridos pelo guia do trabalho, usados para organizar o trabalho. Todos
 | Endereço do contrato | `0x492e97B6C7f47113cb0A294149717f9E16c76E7B` |
 | Etherscan | https://sepolia.etherscan.io/address/0x492e97B6C7f47113cb0A294149717f9E16c76E7B |
 | Transação de deploy | [`0x8c0b122ebe94d8cea60075002c51164b8b0da865ab1cef6b5fbe7ae5e02faa0e`](https://sepolia.etherscan.io/tx/0x8c0b122ebe94d8cea60075002c51164b8b0da865ab1cef6b5fbe7ae5e02faa0e) |
-| Bloco do deploy | 12141726 (15/11/2026) |
+| Bloco do deploy | 12141726 (15/11/2026, 17:32 UTC) |
 | Dono / verificador | `0xbcc3b5e06c1bb35458c8de242573dba669154fb6` |
 | Argumento do constructor | `prazoVerificacaoMin = 5` (prazo de verificação de 300 s, para a demo) |
 | Compilação (Remix) | solc 0.8.34, optimizer ligado (200 runs), arquivo único, licença MIT |
+
+Nota: os testes do Hardhat compilam com solc 0.8.24 e optimizer desligado; o deploy na Sepolia foi compilado no Remix com 0.8.34 e optimizer 200 (mesmo código-fonte; bytecode conferido, igual exceto pelos `immutable`).
+
 
 Passo a passo do deploy e da verificação: [docs/DEPLOY.md](docs/DEPLOY.md).
 
@@ -146,7 +149,7 @@ npm test
 
 ## 10. Roteiro de teste para o avaliador
 
-Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou), **Comunidade** (qualquer conta que o Dono cadastre) e **Apoiador** (qualquer outra conta). Em cada ação a MetaMask abre a confirmação; o app mostra o hash com link do Etherscan e o estado pendente, depois confirmada ou falhou. O prazo de verificação deste deploy é de 5 minutos.
+Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou), **Comunidade** (qualquer conta que o Dono cadastre) e **Apoiador** (qualquer outra conta). Em cada ação a MetaMask abre a confirmação; o app mostra o hash com link do Etherscan e o estado pendente, depois confirmada ou falhou (a linha de uma transação que falhou na blockchain mantém o link do Etherscan). O resultado fica na faixa de avisos até a próxima ação. O prazo de verificação deste deploy é de 5 minutos.
 
 **Preparação.** Abra a URL da Vercel (seção 4) e conecte a conta **Dono**. No painel do verificador, cadastre o endereço da conta Comunidade com um nome.
 
@@ -167,7 +170,9 @@ Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou),
 
 **C. Erros provocados**
 - **Saldo insuficiente**: na conta Apoiador, digite um valor maior que o saldo (ex.: `1000` ETH) e clique em "Apoiar". A UI avisa o saldo antes de abrir a MetaMask.
-- **Erro do contrato decodificado** (`EstadoInvalido`): abra o app em duas abas com um projeto em captação; na aba 2 apoie até atingir a meta (projeto vira Financiado); na aba 1, sem recarregar, clique em "Apoiar". A UI mostra "Ação indisponível: o projeto está em Financiado", obtida da ABI antes de gastar gas.
+- **Erro do contrato decodificado (mais confiável)**: com a conta Comunidade já com 3 projetos ativos, tente criar um 4º. A UI mostra "Limite de 3 projetos atingido." (`LimiteDeProjetosAtingido(3)`), obtido da ABI antes de gastar gas.
+- **Erro do contrato decodificado** (`EstadoInvalido`, duas abas): abra o app em duas abas com um projeto em captação; na aba 2 apoie até atingir a meta (projeto vira Financiado); volte à aba 1 e clique em "Apoiar" em até ~15 s (antes da atualização automática redesenhar o card), ou mantenha o cursor no campo de valor, que pausa a atualização. A UI mostra "Ação indisponível: o projeto está em Financiado", obtida da ABI antes de gastar gas.
+- **Valor inválido**: digite `abc` no campo de valor; a UI avisa sem abrir a MetaMask.
 - **Transação rejeitada**: clique em "Rejeitar" na MetaMask; a UI mostra mensagem de transação cancelada.
 - **Rede errada**: troque a MetaMask para outra rede; aparece o banner e as ações de escrita ficam bloqueadas.
 - O contrato também reverte com `PrazoNaoEncerrado` (ex.: `encerrarPorPrazo` antes do vencimento) e `PrazoEncerrado`; a UI esconde os botões fora do prazo, então esses erros só aparecem na fronteira do prazo ou ao chamar o contrato direto (Remix/Etherscan).
@@ -198,7 +203,8 @@ Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou),
 - **Prazo de verificação fixo no deploy**: 5 minutos na demo (em produção seria da ordem de 7 dias).
 - O dono **não** cancela um projeto em `Captando` depois do `prazoCaptacao`: só `encerrarPorPrazo` (sem penalidade).
 - A comunidade perde a 1ª parcela não sacada se o projeto for cancelado antes do saque.
-- Sem leitura sem carteira conectada (RPC público).
+- Sem leitura sem carteira conectada (RPC público): sem MetaMask, a página mostra um link para instalá-la (https://metamask.io/download/).
+- Título, local e nome aceitam até 80 **bytes** (acentos contam em dobro); a UI avisa antes de enviar.
 
 ## 13. Melhorias futuras
 
@@ -217,10 +223,15 @@ Link: <!-- PREENCHER: link do vídeo (3 a 5 min) -->
 
 ```
 contracts/FlorestaViva.sol      contrato (arquivo único, sem imports)
+contracts/test/                 AtacanteReentrancia.sol (contrato de teste, só local)
 frontend/                       index.html, style.css, app.js, contrato.js (ABI + endereço)
 test/FlorestaViva.test.js       testes automatizados locais (Hardhat)
 scripts/exportar-abi.js         gera a ABI de frontend/contrato.js
+scripts/deploy-local.js         deploy no nó Hardhat local (para desenvolvimento)
+dev/                            servidor e provedor locais para testar a tela sem MetaMask
 docs/DEPLOY.md                  passo a passo de deploy
 docs/APRESENTACAO.md            roteiro da apresentação e da demo
 docs/prints/                    prints do Remix e da dApp
+docs/design.md                  design da solução
+docs/plano.md                   plano de implementação
 ```
