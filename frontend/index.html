@@ -28,7 +28,7 @@
     <div class="cabecalho-carteira">
       <span id="selo-rede" class="selo-rede selo-neutro">Sem rede</span>
       <span class="carteira-dados">
-        <span id="conta" class="conta"></span>
+        <button id="conta" type="button" class="conta" title="Copiar endereço"></button>
         <span id="saldo" class="saldo"></span>
       </span>
       <button id="btn-conectar" type="button" class="btn">Conectar carteira</button>
@@ -40,6 +40,11 @@
     <div id="aviso-rede" class="aviso aviso-rede" hidden>
       <span id="aviso-rede-texto">Você está na rede errada.</span>
       <button id="btn-trocar-rede" type="button" class="btn">Trocar para Sepolia</button>
+    </div>
+
+    <div id="aviso-saldo" class="aviso aviso-saldo" hidden>
+      <span>Seu saldo de SepoliaETH está baixo para apoiar e pagar o gas.</span>
+      <a href="https://cloud.google.com/application/web3/faucet/ethereum/sepolia" target="_blank" rel="noopener">Pegar ETH de teste grátis ↗</a>
     </div>
 
     <div id="aviso-geral" class="aviso aviso-geral" role="status" aria-live="polite" hidden></div>
@@ -112,6 +117,16 @@
     <p>Floresta Viva roda na rede de teste Sepolia. Nenhum valor real é movimentado.</p>
     <p class="credito">Foto: Floresta Amazônica perto de Manaus, por Neil Palmer (CIAT), licença <a href="https://creativecommons.org/licenses/by-sa/2.0/" target="_blank" rel="noopener">CC BY-SA 2.0</a>, via <a href="https://commons.wikimedia.org/wiki/File:Amazon_CIAT_(3).jpg" target="_blank" rel="noopener">Wikimedia Commons</a>. Imagem reduzida e recomprimida.</p>
   </footer>
+
+  <!-- Progresso da transação: fica no canto da tela, visível de qualquer seção. -->
+  <div id="painel-tx" class="painel-tx vidro" role="status" aria-live="polite" hidden>
+    <div class="painel-tx-topo">
+      <strong id="painel-tx-titulo"></strong>
+      <button id="painel-tx-fechar" type="button" class="painel-tx-fechar" aria-label="Fechar">×</button>
+    </div>
+    <ol id="painel-tx-etapas" class="etapas"></ol>
+    <p id="painel-tx-msg" class="painel-tx-msg"></p>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/web3@4.16.0/dist/web3.min.js"></script>
   <script src="contrato.js"></script>

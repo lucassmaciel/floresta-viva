@@ -198,11 +198,11 @@ Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou),
 - **Limite de 20 projetos por comunidade conta o histórico inteiro** (necessário para limitar o laço).
 - **Auto-financiamento**: uma comunidade pode apoiar o próprio projeto a partir de outro endereço para atingir a meta e sacar os 50%. O contrato não impede isso; a mitigação é só a reputação.
 - **`totalApoiadoPor` é bruto**: reembolsos não são subtraídos.
-- **`getPastEvents` depende do RPC da carteira**: o histórico de eventos pode falhar ou ficar incompleto em RPCs que limitam o intervalo de blocos.
+- **Leituras dependem de nós RPC públicos** (publicnode, dRPC; a MetaMask é o último recurso): se todos estiverem fora do ar, a tela avisa e tenta de novo. O histórico é lido aos poucos e divide o intervalo de blocos quando o nó recusa um intervalo grande.
 - **Prazo de verificação fixo no deploy**: 5 minutos na demo (em produção seria da ordem de 7 dias).
 - O dono **não** cancela um projeto em `Captando` depois do `prazoCaptacao`: só `encerrarPorPrazo` (sem penalidade).
 - A comunidade perde a 1ª parcela não sacada se o projeto for cancelado antes do saque.
-- Sem leitura sem carteira conectada (RPC público): sem MetaMask, a página mostra um link para instalá-la (https://metamask.io/download/).
+- Sem MetaMask, a página mostra projetos e histórico (lidos de um RPC público), mas para apoiar é preciso instalá-la (https://metamask.io/download/).
 - Título, local e nome aceitam até 80 **bytes** (acentos contam em dobro); a UI avisa antes de enviar.
 
 ## 13. Melhorias futuras

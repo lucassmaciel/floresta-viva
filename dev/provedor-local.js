@@ -8,6 +8,9 @@
   let chainAtual = "0x7a69"; // rede "errada" de proposito, para testar o aviso
   const ouvintes = {};
 
+  // O app le a blockchain direto por este no (em vez do RPC publico da Sepolia).
+  window.FLORESTA_RPC_LEITURA = RPC;
+
   async function rpc(method, params) {
     const r = await fetch(RPC, {
       method: "POST",
