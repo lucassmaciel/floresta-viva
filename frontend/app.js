@@ -5,11 +5,11 @@
 //   2. Utilitários (formatação, avisos)
 //   3. Conexão com a carteira
 //   4. Rede (Sepolia)
-//   5. Papéis (dono / comunidade)
-//   6. Leitura de projetos, apoios e histórico (somente leitura, .call())
+//   5. Leitura rápida (nó RPC público + Multicall3, sem passar pela MetaMask)
+//   6. Leitura de papéis, projetos, apoios e histórico (somente leitura)
 //   7. Renderização (totais, cards, painéis por papel, histórico)
 //   8. Orquestração da tela (atualizarTudo)
-//   9. Transações, status e erros (enviarTransacao, traduzirErro, ações da tela)
+//   9. Transações, painel de progresso e erros (enviarTransacao, traduzirErro, ações)
 //  10. Inicialização, contagem regressiva e eventos da carteira
 
 // ---------------------------------------------------------------------------
@@ -26,16 +26,45 @@ const SEPOLIA = {
 
 const ENDERECO_ZERO = "0x0000000000000000000000000000000000000000";
 
+// Leituras (projetos, saldo, histórico) vão direto a um nó RPC público da Sepolia, sem
+// passar pela MetaMask: a carteira atende um pedido por vez (cada eth_call esperava até
+// ~0,5 s na fila dela). A MetaMask fica só com o que precisa dela: conta, rede e assinatura.
+// Se um nó falhar, a próxima atualização usa o seguinte ("carteira" = a própria MetaMask).
+// Em desenvolvimento, dev/provedor-local.js troca a lista pelo nó local do Hardhat.
+const RPCS_LEITURA = window.FLORESTA_RPC_LEITURA
+  ? [window.FLORESTA_RPC_LEITURA]
+  : [SEPOLIA.rpc, "https://sepolia.drpc.org", "carteira"];
+
+// Multicall3: contrato público (mesmo endereço em quase todas as redes, inclusive Sepolia)
+// que executa várias leituras numa única eth_call. Sem ele (ex.: nó local do Hardhat),
+// as leituras vão em paralelo, uma por chamada.
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+
+// Faucet de SepoliaETH (o mesmo indicado no README), sugerido quando o saldo está baixo.
+const URL_FAUCET = "https://cloud.google.com/application/web3/faucet/ethereum/sepolia";
+const SALDO_BAIXO = 10n ** 16n; // 0,01 ETH
+
+// Transação enviada e ainda sem recibo fica salva aqui: recarregar a página não a perde.
+const CHAVE_TX_PENDENTE = "floresta-viva:tx-pendente";
+const TITULO_PAGINA = document.title;
+
 // Estado único da aplicação: as telas leem daqui, nunca guardam cópia própria.
 const estado = {
-  web3: null,        // instância do Web3 (null se não há carteira instalada)
-  contrato: null,    // objeto Contract do Web3 (null se o contrato não está configurado)
+  web3: null,        // Web3 de LEITURA (nó RPC público); existe mesmo sem carteira
+  contrato: null,    // contrato ligado ao Web3 de leitura (.call() e encodeABI)
+  rpcIndice: 0,      // posição do nó atual em RPCS_LEITURA
+  multicall: null,   // o nó tem Multicall3? (null = ainda não testado)
+  saldo: null,       // saldo da conta na Sepolia (BigInt) ou null
+  chaveAtualizacao: "", // "bloco|conta|rede" da última leitura completa (pula releituras iguais)
+  eventos: [],       // histórico em cache, lido aos poucos (só os blocos novos)
+  blocoEventos: null, // último bloco já incluído no histórico
+  nomesComunidades: {}, // cache endereço (minúsculo) -> nome da comunidade
   conta: null,       // endereço conectado (string) ou null
   chainId: null,     // chainId atual em hexadecimal (ex.: "0xaa36a7")
   dono: null,        // endereço do dono (verificador), lido de dono()
   ehDono: false,     // a conta conectada é o dono?
   comunidade: null,  // { nome, ativa, reputacao (BigInt) } se a conta é comunidade cadastrada
-  projetos: [],      // lista normalizada, preenchida por carregarProjetos()
+  projetos: [],      // lista normalizada, preenchida por carregarDados()
   totalApoiado: 0n,  // totalApoiadoPor(conta): soma bruta, nunca reduzida por reembolsos
   naSepolia: false,  // a carteira está na Sepolia?
   txPendente: false, // há uma transação aguardando confirmação?
@@ -142,11 +171,12 @@ const contratoConfigurado = () =>
 // Erro -32002 da MetaMask: já existe um pop-up aberto esperando resposta.
 const MSG_PEDIDO_PENDENTE = "Já existe um pedido pendente: abra a MetaMask.";
 
-// Pede acesso às contas (abre a MetaMask). Chamada pelo botão "Conectar carteira".
+// Pede acesso às contas (abre a MetaMask). Chamada pelo botão "Conectar carteira" e,
+// automaticamente, quando alguém tenta uma ação sem estar conectado. Devolve true se conectou.
 async function conectarCarteira() {
   if (!window.ethereum) {
     mostrarAvisoInstalar();
-    return;
+    return false;
   }
   try {
     const contas = await window.ethereum.request({ method: "eth_requestAccounts" });
@@ -156,9 +186,10 @@ async function conectarCarteira() {
     if (e && e.code === 4001) mostrarAviso("Conexão recusada na carteira.", "erro");
     else if (e && e.code === -32002) mostrarAviso(MSG_PEDIDO_PENDENTE, "erro");
     else mostrarAviso("Não foi possível conectar a carteira.", "erro");
-    return;
+    return false;
   }
-  await atualizarTudo();
+  atualizarTudo(); // sem await: quem chamou segue em frente enquanto a tela atualiza
+  return !!estado.conta;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,13 +203,14 @@ async function verificarRede() {
 }
 
 // Pede à carteira para trocar para a Sepolia; se ela não conhece a rede
-// (erro 4902), pede para adicioná-la.
+// (erro 4902), pede para adicioná-la. Devolve true se a troca deu certo.
 async function trocarParaSepolia() {
   try {
     await window.ethereum.request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: SEPOLIA.chainId }],
     });
+    return true;
   } catch (e) {
     // Algumas versões da MetaMask escondem o 4902 em e.data.originalError.code.
     const codigo = e && (e.code === 4902 ? 4902 : e.data?.originalError?.code);
@@ -194,6 +226,7 @@ async function trocarParaSepolia() {
             blockExplorerUrls: [SEPOLIA.explorer],
           }],
         });
+        return true;
       } catch (e2) {
         if (e2 && e2.code === -32002) mostrarAviso(MSG_PEDIDO_PENDENTE, "erro");
         else mostrarAviso("Não foi possível adicionar a rede Sepolia.", "erro");
@@ -205,60 +238,125 @@ async function trocarParaSepolia() {
     } else {
       mostrarAviso("Não foi possível trocar para a Sepolia.", "erro");
     }
+    return false;
   }
-  // Em caso de sucesso a carteira dispara "chainChanged", que atualiza a tela.
+  // Em caso de sucesso a carteira também dispara "chainChanged", que atualiza a tela.
 }
 
 // ---------------------------------------------------------------------------
-// 5. Papéis (dono / comunidade)
+// 5. Leitura rápida (nó RPC público + Multicall3)
 // ---------------------------------------------------------------------------
 
-// Descobre quem é a conta conectada: dono (verificador), comunidade ou apoiador.
-async function carregarPapel() {
-  estado.dono = null;
-  estado.ehDono = false;
-  estado.comunidade = null;
-  if (!estado.contrato || !estado.conta) return;
-
-  estado.dono = await estado.contrato.methods.dono().call();
-  estado.ehDono = estado.dono.toLowerCase() === estado.conta.toLowerCase();
-
-  // O getter público devolve (nome, cadastrada, ativa, reputacao).
-  // reputacao é int256: chega como BigInt e pode ser negativa.
-  const c = await estado.contrato.methods.comunidades(estado.conta).call();
-  if (c.cadastrada) {
-    estado.comunidade = { nome: c.nome, ativa: c.ativa, reputacao: BigInt(c.reputacao) };
-  }
+// Cria o Web3 de leitura com o nó atual da lista.
+function criarLeitura() {
+  const alvo = RPCS_LEITURA[estado.rpcIndice % RPCS_LEITURA.length];
+  estado.web3 = new Web3(alvo === "carteira" ? window.ethereum : alvo);
+  estado.contrato = contratoConfigurado()
+    ? new estado.web3.eth.Contract(CONTRATO.abi, CONTRATO.endereco)
+    : null;
+  estado.multicall = null;
 }
 
+// Nó fora do ar ou limitando pedidos: a próxima atualização usa o seguinte da lista.
+// A carteira só entra na vez dela se existir e estiver na Sepolia.
+function trocarNoDeLeitura() {
+  let proximo = estado.rpcIndice + 1;
+  if (RPCS_LEITURA[proximo % RPCS_LEITURA.length] === "carteira" && !(window.ethereum && estado.naSepolia)) proximo++;
+  estado.rpcIndice = proximo;
+  criarLeitura();
+}
+
+// Pedido JSON-RPC cru ao nó de leitura (devolve só o "result").
+const pedirAoNo = (method, params = []) => estado.web3.requestManager.send({ method, params });
+
+const itemAbi = (nome) => CONTRATO.abi.find((i) => i.type === "function" && i.name === nome);
+
+// aggregate3((address target, bool allowFailure, bytes callData)[]) do Multicall3.
+const ABI_AGGREGATE3 = {
+  name: "aggregate3",
+  type: "function",
+  inputs: [{ name: "calls", type: "tuple[]", components: [
+    { name: "target", type: "address" },
+    { name: "allowFailure", type: "bool" },
+    { name: "callData", type: "bytes" },
+  ] }],
+  outputs: [{ name: "returnData", type: "tuple[]", components: [
+    { name: "success", type: "bool" },
+    { name: "returnData", type: "bytes" },
+  ] }],
+};
+
+// Várias leituras do contrato de uma vez. chamadas: [["nomeDaFuncao", ...args], ...].
+// Devolve os resultados na mesma ordem e no mesmo formato de .call().
+// Com Multicall3 vira UMA eth_call (em lotes de 200, para não passar do limite de gas).
+async function lerVarios(chamadas) {
+  if (!chamadas.length) return [];
+  const m = estado.contrato.methods;
+  if (estado.multicall === null) {
+    try { estado.multicall = (await estado.web3.eth.getCode(MULTICALL3)) !== "0x"; }
+    catch (e) { estado.multicall = false; }
+  }
+  if (!estado.multicall) {
+    return Promise.all(chamadas.map(([nome, ...args]) => m[nome](...args).call()));
+  }
+
+  const abi = estado.web3.eth.abi;
+  const resultados = [];
+  for (let i = 0; i < chamadas.length; i += 200) {
+    const lote = chamadas.slice(i, i + 200);
+    const dados = abi.encodeFunctionCall(ABI_AGGREGATE3,
+      [lote.map(([nome, ...args]) => [CONTRATO.endereco, false, m[nome](...args).encodeABI()])]);
+    const bruto = await estado.web3.eth.call({ to: MULTICALL3, data: dados });
+    const respostas = abi.decodeParameters(ABI_AGGREGATE3.outputs, bruto)[0];
+    respostas.forEach((r, j) => {
+      const saidas = itemAbi(lote[j][0]).outputs;
+      const d = abi.decodeParameters(saidas, r.returnData);
+      resultados.push(saidas.length === 1 ? d[0] : d);
+    });
+  }
+  return resultados;
+}
 
 // ---------------------------------------------------------------------------
-// 6. Leitura de projetos, apoios e histórico (somente leitura: .call())
+// 6. Leitura de papéis, projetos, apoios e histórico (somente leitura)
 // ---------------------------------------------------------------------------
 
 const NOMES_STATUS = ["Captando", "Financiado", "Plantado", "Verificado", "Cancelado"];
 const STATUS = { CAPTANDO: 0, FINANCIADO: 1, PLANTADO: 2, VERIFICADO: 3, CANCELADO: 4 };
 
-// Lê todos os projetos da blockchain e guarda em estado.projetos.
-// Para cada projeto também lê o que a conta conectada pode sacar/reembolsar/já apoiou.
-async function carregarProjetos() {
-  const m = estado.contrato.methods;
-  const conta = estado.conta;
-  const total = Number(await m.totalProjetos().call());
+// Lê tudo o que a tela mostra, normalmente numa única ida ao nó (antes eram ~5 chamadas
+// por projeto, enfileiradas na MetaMask). Não mexe no estado: devolve os dados para atualizarTudo().
+async function carregarDados(conta) {
+  const passo = conta ? 4 : 2;
+  // Leituras de cada projeto: ele e o que a conta pode sacar/reembolsar/já apoiou nele.
+  const doProjeto = (i) => [
+    ["obterProjeto", i], ["disponivelParaSaque", i],
+    ...(conta ? [["valorReembolsavel", i, conta], ["contribuicoes", i, conta]] : []),
+  ];
 
-  // Lê os projetos em paralelo (um Promise por projeto) para a tela carregar rápido.
-  const ids = Array.from({ length: total }, (_, i) => i);
-  const lista = await Promise.all(ids.map(async (i) => {
-    const p = await m.obterProjeto(i).call();
-    const disponivel = BigInt(await m.disponivelParaSaque(i).call());
-    let reembolsavel = 0n;
-    let contribuicao = 0n;
-    if (conta) {
-      reembolsavel = BigInt(await m.valorReembolsavel(i, conta).call());
-      contribuicao = BigInt(await m.contribuicoes(i, conta).call());
-    }
+  // Total de projetos e papel da conta (dono? comunidade?) vão JUNTO com os projetos já
+  // conhecidos (projetos nunca são apagados, então os da última leitura continuam existindo).
+  const conhecidos = estado.projetos.length;
+  const base = [["totalProjetos"], ["dono"]];
+  if (conta) base.push(["comunidades", conta], ["totalApoiadoPor", conta]);
+  const chamadas = [...base];
+  for (let i = 0; i < conhecidos; i++) chamadas.push(...doProjeto(i));
+  const lidos = await lerVarios(chamadas);
+  const [total, dono, comunidade, totalApoiado] = lidos;
+  let r = lidos.slice(base.length);
+
+  // Projetos criados desde a última leitura: mais uma ida, só para eles.
+  const n = Number(total);
+  if (n > conhecidos) {
+    const novas = [];
+    for (let i = conhecidos; i < n; i++) novas.push(...doProjeto(i));
+    r = r.concat(await lerVarios(novas));
+  }
+  const projetos = [];
+  for (let i = 0; i < n; i++) {
+    const [p, disponivel, reembolsavel = 0n, contribuicao = 0n] = r.slice(i * passo, (i + 1) * passo);
     // Normaliza: uint256 vira BigInt, status vira Number, o resto fica como texto.
-    return {
+    projetos.push({
       id: i,
       comunidade: p.comunidade,
       titulo: p.titulo,
@@ -271,24 +369,30 @@ async function carregarProjetos() {
       prazoVerificacao: Number(p.prazoVerificacao),
       prova: p.provaPlantio,
       status: Number(p.status),
-      disponivel,
-      reembolsavel,
-      contribuicao,
-    };
-  }));
+      disponivel: BigInt(disponivel),
+      reembolsavel: BigInt(reembolsavel),
+      contribuicao: BigInt(contribuicao),
+    });
+  }
 
-  // Nome de cada comunidade (uma leitura por endereço, não por projeto), para mostrar no card.
-  const enderecos = [...new Set(lista.map((p) => p.comunidade.toLowerCase()))];
-  const nomes = {};
-  await Promise.all(enderecos.map(async (end) => {
-    const c = await m.comunidades(end).call();
-    nomes[end] = c.nome;
-  }));
-  lista.forEach((p) => { p.nomeComunidade = nomes[p.comunidade.toLowerCase()] || ""; });
+  // 3ª ida (só quando aparece comunidade nova): nome de cada comunidade, guardado em cache.
+  const faltam = [...new Set(projetos.map((p) => p.comunidade.toLowerCase()))]
+    .filter((end) => !(end in estado.nomesComunidades));
+  const lidas = await lerVarios(faltam.map((end) => ["comunidades", end]));
+  faltam.forEach((end, i) => { estado.nomesComunidades[end] = lidas[i].nome; });
+  projetos.forEach((p) => { p.nomeComunidade = estado.nomesComunidades[p.comunidade.toLowerCase()] || ""; });
 
-  estado.projetos = lista;
-  // totalApoiadoPor é bruto: reembolsos NÃO o reduzem (por isso o rótulo "Total já apoiado").
-  estado.totalApoiado = conta ? BigInt(await m.totalApoiadoPor(conta).call()) : 0n;
+  // O getter comunidades() devolve (nome, cadastrada, ativa, reputacao); reputacao é int256
+  // (BigInt, pode ser negativa). totalApoiadoPor é bruto: reembolsos NÃO o reduzem.
+  return {
+    projetos,
+    dono,
+    ehDono: !!conta && dono.toLowerCase() === conta.toLowerCase(),
+    comunidade: comunidade && comunidade.cadastrada
+      ? { nome: comunidade.nome, ativa: comunidade.ativa, reputacao: BigInt(comunidade.reputacao) }
+      : null,
+    totalApoiado: conta ? BigInt(totalApoiado) : 0n,
+  };
 }
 
 // Frase em português para cada evento do contrato (usada no histórico).
@@ -321,19 +425,41 @@ function frase(ev) {
   }
 }
 
-// Lê os eventos desde o bloco do deploy e mostra os mais recentes primeiro.
+// Busca eventos num intervalo de blocos. Se o nó recusar (muitos blocos de uma vez),
+// divide o intervalo ao meio e tenta de novo.
+async function buscarEventos(de, ate) {
+  try {
+    return await estado.contrato.getPastEvents("allEvents", { fromBlock: de, toBlock: ate });
+  } catch (e) {
+    if (ate - de < 500) throw e;
+    const meio = Math.floor((de + ate) / 2);
+    return [...await buscarEventos(de, meio), ...await buscarEventos(meio + 1, ate)];
+  }
+}
+
+const chaveEvento = (ev) => `${ev.transactionHash}:${ev.logIndex}`;
+
+// Histórico incremental: a primeira leitura vai do bloco do deploy até "ateBloco"; as
+// seguintes só buscam os blocos novos e juntam ao cache. Mostra os mais recentes primeiro.
 // Se falhar, só esta seção mostra "Histórico indisponível"; o resto da tela segue normal.
 // "versao" evita que uma leitura antiga sobrescreva uma atualização mais nova.
-async function carregarHistorico(versao = versaoAtualizacao) {
+async function carregarHistorico(versao, ateBloco) {
   const ul = $("historico");
   try {
-    const eventos = await estado.contrato.getPastEvents("allEvents", {
-      fromBlock: CONTRATO.blocoDeploy,
-      toBlock: "latest",
-    });
+    const de = estado.blocoEventos === null ? CONTRATO.blocoDeploy : estado.blocoEventos + 1;
+    if (de <= ateBloco) {
+      const novos = await buscarEventos(de, ateBloco);
+      if (versao !== versaoAtualizacao) return;
+      const vistos = new Set(estado.eventos.map(chaveEvento));
+      const ineditos = novos.filter((ev) => !vistos.has(chaveEvento(ev)));
+      // Comunidade (re)cadastrada pode ter nome novo: esvazia o cache de nomes.
+      if (ineditos.some((ev) => ev.event === "ComunidadeCadastrada")) estado.nomesComunidades = {};
+      estado.eventos = ineditos.concat(estado.eventos).sort((a, b) =>
+        Number(b.blockNumber) - Number(a.blockNumber) || Number(b.logIndex) - Number(a.logIndex));
+      estado.blocoEventos = Math.max(estado.blocoEventos ?? 0, ateBloco);
+    }
     if (versao !== versaoAtualizacao) return;
-    eventos.sort((a, b) =>
-      Number(b.blockNumber) - Number(a.blockNumber) || Number(b.logIndex) - Number(a.logIndex));
+    const eventos = estado.eventos;
     if (!eventos.length) {
       ul.innerHTML = '<li class="vazio">Nenhum evento ainda.</li>';
       renderizarFaixaEventos([]);
@@ -384,10 +510,9 @@ function prazoAtual(p) {
 }
 
 // Mensagem quando não há o que listar (sem contrato, rede errada, sem projetos).
+// (Os projetos são lidos de um nó público: aparecem mesmo sem carteira ou em outra rede.)
 function mensagemVazia() {
   if (!contratoConfigurado()) return "Contrato não configurado.";
-  if (!estado.web3) return "Instale a MetaMask para ver os projetos.";
-  if (!estado.naSepolia) return "Conecte-se à rede Sepolia para ver os projetos.";
   return "";
 }
 
@@ -427,15 +552,28 @@ function acoesDoProjeto(p) {
   const btnEncerrar = `<button type="button" class="btn btn-secundario" data-acao="encerrar" data-id="${p.id}" data-apos="${prazo ? prazo.ts : 0}">Encerrar projeto</button>`;
 
   if (p.status === STATUS.CAPTANDO) {
-    if (estado.conta) {
+    if (window.ethereum) {
+      // Mesmo sem conta conectada o campo aparece: clicar em "Apoiar" conecta a carteira
+      // (e troca para a Sepolia) no caminho. Enter no campo também apoia.
+      const falta = p.meta > p.arrecadado ? p.meta - p.arrecadado : 0n;
+      const chip = (valor, texto = valor, titulo = `Preencher ${valor} ETH`) =>
+        `<button type="button" class="chip" data-valor="${valor}" data-alvo="valor-${p.id}" title="${titulo}">${texto}</button>`;
       partes.push(
-        `<span class="campo-apoio" data-ate="${p.prazoCaptacao}">` +
+        `<div class="apoio" data-ate="${p.prazoCaptacao}">` +
+        `<span class="campo-apoio">` +
         `<input type="text" inputmode="decimal" value="0,01" aria-label="Valor em ETH" data-campo="valor-${p.id}">` +
         `<span class="unidade">ETH</span>` +
-        `<button type="button" class="btn" data-acao="apoiar" data-id="${p.id}">Apoiar</button></span>`
+        `<button type="button" class="btn" data-acao="apoiar" data-id="${p.id}">Apoiar</button></span>` +
+        `<span class="valores-rapidos">` +
+        ["0,01", "0,05", "0,1"].map((v) => chip(v)).join("") +
+        (falta > 0n
+          ? chip(estado.web3.utils.fromWei(falta, "ether").replace(".", ","), "Completar a meta",
+            `Preencher o que falta para a meta (${formatarEth(falta)} ETH)`)
+          : "") +
+        `</span></div>`
       );
     } else {
-      partes.push(`<span class="vazio" data-ate="${p.prazoCaptacao}">Conecte a carteira para apoiar.</span>`);
+      partes.push(`<span class="vazio" data-ate="${p.prazoCaptacao}">Instale a <a href="${URL_METAMASK}" target="_blank" rel="noopener">MetaMask</a> para apoiar.</span>`);
     }
     partes.push(btnEncerrar);
   } else if (p.status === STATUS.FINANCIADO) {
@@ -543,13 +681,7 @@ function renderizarProjetos() {
   const lista = $("lista-projetos");
   const msg = mensagemVazia();
   renderizarFiltros();
-  if (contratoConfigurado() && !estado.web3) {
-    // Sem carteira: mensagem com link para instalar a MetaMask.
-    const p = document.createElement("p");
-    p.className = "vazio";
-    p.append(criarMensagemInstalar("Instale a MetaMask para ver os projetos."));
-    lista.replaceChildren(p);
-  } else if (msg) {
+  if (msg) {
     lista.innerHTML = `<p class="vazio">${msg}</p>`;
   } else if (!estado.projetos.length) {
     lista.innerHTML = '<p class="vazio">Nenhum projeto ainda. Comunidades cadastradas podem criar o primeiro.</p>';
@@ -605,7 +737,7 @@ function renderizarPainelComunidade() {
 // Meus apoios: total já apoiado, contribuições por projeto e reembolsos disponíveis.
 function renderizarMeusApoios() {
   const painel = $("meus-apoios");
-  painel.hidden = !estado.conta || !estado.naSepolia;
+  painel.hidden = !estado.conta;
   if (painel.hidden) return;
   const apoios = estado.projetos.filter((p) => p.contribuicao > 0n);
   const itens = apoios.length
@@ -714,6 +846,11 @@ function atualizarContagens() {
   // Botões que só valem depois do prazo (encerrar) ou só até o prazo (apoiar, registrar prova).
   document.querySelectorAll("[data-apos]").forEach((el) => { el.hidden = t < Number(el.dataset.apos); });
   document.querySelectorAll("[data-ate]").forEach((el) => { el.hidden = t >= Number(el.dataset.ate); });
+  // Tempo desde o envio de uma transação pendente (data-desde em milissegundos).
+  document.querySelectorAll("[data-desde]").forEach((el) => {
+    const s = Math.max(0, Math.floor((Date.now() - Number(el.dataset.desde)) / 1000));
+    el.textContent = s < 60 ? `há ${s} s` : `há ${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -727,80 +864,72 @@ const MSG_ERRO_LEITURA = "Erro ao ler dados da blockchain. Tente novamente.";
 let versaoAtualizacao = 0;
 
 // Único ponto que reconstrói a tela a partir da carteira e da blockchain.
-// Ordem: conexão -> rede -> papel -> projetos -> histórico.
-async function atualizarTudo() {
+// Rede da carteira e bloco atual -> (se mudou algo) papéis, projetos e saldo + histórico.
+// forcar=false (atualização automática): se o bloco, a conta e a rede são os mesmos da
+// última leitura, nada mudou na blockchain e a releitura é pulada (custa só 1 pedido).
+async function atualizarTudo({ forcar = true } = {}) {
   const versao = ++versaoAtualizacao;
   const obsoleta = () => versao !== versaoAtualizacao;
+  const temCarteira = !!window.ethereum;
 
-  // Sem carteira instalada: só o aviso.
-  if (!window.ethereum) {
+  if (!contratoConfigurado()) {
     estado.projetos = [];
-    renderizarCabecalho(false, false);
+    mostrarAviso("Contrato não configurado: publique o contrato e preencha o endereço em contrato.js.", "erro");
+    renderizarCabecalho(false, temCarteira);
     renderizarPaineis();
-    mostrarAvisoInstalar();
-    $("historico").innerHTML = '<li class="vazio">Instale a MetaMask para ver o histórico.</li>';
-    renderizarFaixaEventos([], "Instale a MetaMask para acompanhar o contrato ao vivo.");
     return;
   }
 
-  // Declaradas fora do try para o catch ainda conseguir redesenhar o cabeçalho.
-  let naSepolia = false;
-  let saldo = null;
+  const conta = estado.conta;
+  // Projetos e saldo. Na atualização forçada já começam junto com a consulta do bloco;
+  // na automática, só depois de saber que há bloco novo.
+  const lerDados = () => Promise.all([
+    carregarDados(conta),
+    conta ? estado.web3.eth.getBalance(conta).then(BigInt) : null,
+  ]);
+  let leitura = forcar ? lerDados() : null;
+  leitura?.catch(() => {}); // o erro é tratado no await abaixo
   try {
-    naSepolia = await verificarRede();
+    // A rede vem da carteira (resposta local, instantânea); o bloco, do nó de leitura.
+    const [naSepolia, bloco] = await Promise.all([
+      temCarteira ? verificarRede().catch(() => false) : false,
+      estado.web3.eth.getBlockNumber().then(Number),
+    ]);
     if (obsoleta()) return;
     estado.naSepolia = naSepolia;
 
-    // Saldo da conta conectada (BigInt em wei).
-    if (estado.conta) {
-      saldo = await estado.web3.eth.getBalance(estado.conta);
-      if (obsoleta()) return;
-    }
+    // Nada mudou desde a última leitura (mesmo bloco, conta e rede): não há o que reler.
+    const chave = `${bloco}|${conta}|${naSepolia}`;
+    if (!forcar && chave === estado.chaveAtualizacao) return;
 
-    // Contrato só é consultado na Sepolia (em outra rede ele não existe).
-    estado.dono = null;
-    estado.ehDono = false;
-    estado.comunidade = null;
-    // estado.projetos só é trocado quando a leitura nova dá certo (se falhar, a lista antiga fica).
-    if (!contratoConfigurado() || !naSepolia) {
-      estado.projetos = [];
-      estado.totalApoiado = 0n;
-    }
-    // Uma leitura bem-sucedida apaga SÓ o aviso de erro de leitura antigo (inclusive em rede errada).
-    // Resultados e erros de transação ficam na tela até a próxima ação do usuário,
-    // mesmo com a atualização automática de 15 s rodando.
+    // Histórico em paralelo com o resto (tem tratamento de erro próprio).
+    const historico = carregarHistorico(versao, bloco);
+    const [dados, saldo] = await (leitura || lerDados());
+    if (obsoleta()) return;
+    Object.assign(estado, dados);
+    estado.saldo = saldo;
+    estado.chaveAtualizacao = chave;
+
+    // Uma leitura bem-sucedida apaga SÓ o aviso de erro de leitura antigo. Os demais avisos
+    // ficam na tela até a próxima ação do usuário, mesmo com a atualização automática.
     if ($("aviso-geral").textContent === MSG_ERRO_LEITURA) mostrarAviso("");
-    if (!contratoConfigurado()) {
-      mostrarAviso("Contrato não configurado: publique o contrato e preencha o endereço em contrato.js.", "erro");
-    } else if (naSepolia) {
-      // (Não limpa a faixa aqui: ela também guarda o resultado da última transação.)
-      await carregarPapel();
-      if (obsoleta()) return;
-      await carregarProjetos();
-      if (obsoleta()) return;
-    }
-
-    renderizarCabecalho(naSepolia, true, saldo);
+    renderizarCabecalho(naSepolia, temCarteira);
     renderizarPaineis();
-
-    // O histórico tem tratamento de erro próprio: se falhar, só ele avisa.
-    if (contratoConfigurado() && naSepolia) await carregarHistorico(versao);
-    else {
-      $("historico").innerHTML = '<li class="vazio">Conecte-se à Sepolia para ver o histórico.</li>';
-      renderizarFaixaEventos([], "Conecte-se à Sepolia para acompanhar o contrato ao vivo.");
-    }
+    await historico;
   } catch (e) {
     console.error(e);
     if (obsoleta()) return;
+    trocarNoDeLeitura(); // a próxima atualização tenta outro nó
     mostrarAviso(MSG_ERRO_LEITURA, "erro");
-    // Mesmo com erro, a tela reflete o que se sabe (conta, rede, papéis).
-    renderizarCabecalho(naSepolia, true, saldo);
+    // Mesmo com erro, a tela reflete o que se sabe (a lista antiga fica).
+    renderizarCabecalho(estado.naSepolia, temCarteira);
     renderizarPaineis();
   }
 }
 
-// Atualiza selo de rede, conta, saldo, botão de conectar e banner de rede errada.
-function renderizarCabecalho(naSepolia, temCarteira, saldo) {
+// Atualiza selo de rede, conta, saldo, botão de conectar e banners de rede errada / saldo baixo.
+function renderizarCabecalho(naSepolia, temCarteira) {
+  const saldo = estado.saldo;
   const selo = $("selo-rede");
   if (!temCarteira) {
     selo.textContent = "Sem carteira";
@@ -814,21 +943,28 @@ function renderizarCabecalho(naSepolia, temCarteira, saldo) {
   }
 
   $("conta").textContent = estado.conta ? abreviar(estado.conta) : "";
-  $("saldo").textContent = estado.conta && saldo !== null && saldo !== undefined ? formatarEth(saldo) + " ETH" : "";
+  $("saldo").textContent = estado.conta && saldo !== null ? formatarEth(saldo) + " ETH" : "";
   $("btn-conectar").hidden = !!estado.conta;
+  $("btn-conectar").textContent = temCarteira ? "Conectar carteira" : "Instalar MetaMask";
 
+  // Só avisa da rede errada para quem já conectou (os projetos aparecem em qualquer rede,
+  // e as ações trocam para a Sepolia sozinhas).
   const banner = $("aviso-rede");
-  banner.hidden = !temCarteira || naSepolia;
+  banner.hidden = !temCarteira || !estado.conta || naSepolia;
   if (!banner.hidden) {
-    $("aviso-rede-texto").textContent = "Você está na rede errada. Use a rede Sepolia.";
+    $("aviso-rede-texto").textContent = "Sua carteira está em outra rede. As ações usam a Sepolia.";
   }
+  // Saldo baixo: link para o faucet de SepoliaETH (ETH de teste, grátis).
+  $("aviso-saldo").hidden = !estado.conta || saldo === null || saldo >= SALDO_BAIXO;
 }
 
 // ---------------------------------------------------------------------------
 // 9. Transações, status e erros
 // ---------------------------------------------------------------------------
 // Toda ação que ESCREVE na blockchain passa por enviarTransacao():
-//   validar -> simular (call) -> enviar (send) -> acompanhar -> atualizar a tela.
+//   conectar/trocar de rede se preciso -> simular (call no nó de leitura) ->
+//   assinar (eth_sendTransaction direto na MetaMask) -> acompanharTransacao() -> atualizar.
+// O progresso aparece no painel flutuante (canto da tela), visível de qualquer seção.
 // Se algo der errado, traduzirErro() transforma o erro técnico em português.
 
 // "0,01" ou "0.01" -> wei (BigInt). Só aceita número positivo com até 18 casas decimais.
@@ -855,97 +991,231 @@ function bloquearAcoes(bloquear) {
 // Escreve uma linha de status na lista "Transações".
 // situacao: "pendente", "confirmada" ou "falhou" (vira a cor da borda via classe tx-*).
 const CLASSE_TX = { pendente: "tx-pendente", confirmada: "tx-ok", falhou: "tx-erro" };
-function escreverLinhaTx(li, situacao, texto, hash) {
+const ROTULO_TX = { pendente: "Aguardando confirmação", confirmada: "Confirmada", falhou: "Falhou" };
+function escreverLinhaTx(li, situacao, texto, hash, desde = null) {
   li.className = CLASSE_TX[situacao];
   li.innerHTML =
-    `<span class="tx-situacao">${situacao === "pendente" ? "Aguardando confirmação" : situacao === "confirmada" ? "Confirmada" : "Falhou"}</span>` +
+    `<span class="tx-situacao">${ROTULO_TX[situacao]}` +
+    (situacao === "pendente" && desde ? ` <span class="decorrido" data-desde="${desde}"></span>` : "") +
+    `</span>` +
     esc(texto) +
     (hash ? ` <a href="${linkTx(hash)}" target="_blank" rel="noopener">${esc(abreviar(hash))}</a>` : "");
 }
 
+// ---- Painel flutuante da transação ------------------------------------------
+
+const ETAPAS_TX = ["Verificando", "Confirme na MetaMask", "Gravando na blockchain", "Concluída"];
+
+// Mostra o painel flutuante. etapa: índice em ETAPAS_TX (ou null para só a mensagem).
+// situacao: "andamento", "ok" ou "erro". Sucesso some sozinho; erro fica até fechar.
+function mostrarPainelTx({ titulo, etapa = null, situacao = "andamento", mensagem = "", hash = null, desde = null }) {
+  const painel = $("painel-tx");
+  clearTimeout(mostrarPainelTx.timer);
+  painel.dataset.situacao = situacao;
+  $("painel-tx-titulo").textContent = titulo;
+
+  const lista = $("painel-tx-etapas");
+  lista.hidden = etapa === null;
+  if (etapa !== null) {
+    lista.innerHTML = ETAPAS_TX.map((nome, i) => {
+      let classe = "";
+      if (i < etapa || (i === etapa && situacao === "ok")) classe = "feita";
+      else if (i === etapa) classe = situacao === "erro" ? "erro" : "atual";
+      const tempo = classe === "atual" && desde ? ` <span class="decorrido" data-desde="${desde}"></span>` : "";
+      return `<li class="${classe}">${nome}${tempo}</li>`;
+    }).join("");
+  }
+
+  // Mensagem com textContent e o link montado à mão: seguro por construção.
+  const msg = $("painel-tx-msg");
+  msg.replaceChildren();
+  if (mensagem) msg.append(mensagem);
+  if (hash) {
+    const a = document.createElement("a");
+    a.href = linkTx(hash);
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "Ver no Etherscan ↗";
+    msg.append(mensagem ? " " : "", a);
+  }
+  msg.hidden = !msg.childNodes.length;
+  painel.hidden = false;
+  if (situacao === "ok") mostrarPainelTx.timer = setTimeout(() => { painel.hidden = true; }, 10000);
+  atualizarContagens();
+}
+
+// ---- Transação pendente salva (sobrevive a recarregar a página) ------------
+
+function salvarPendente(dados) {
+  try { localStorage.setItem(CHAVE_TX_PENDENTE, JSON.stringify(dados)); } catch (e) { /* sem armazenamento */ }
+}
+function lerPendente() {
+  try { return JSON.parse(localStorage.getItem(CHAVE_TX_PENDENTE)); } catch (e) { return null; }
+}
+function apagarPendente() {
+  try { localStorage.removeItem(CHAVE_TX_PENDENTE); } catch (e) { /* sem armazenamento */ }
+}
+
+// ---- Envio e acompanhamento --------------------------------------------------
+
 // Erro de validação feito por nós (já está em português; não precisa de tradução).
 class ErroDeUsuario extends Error {}
+
+const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 // Envia uma transação. "metodo" é o objeto retornado por contrato.methods.x(...).
 // Devolve true se a transação foi confirmada com sucesso.
 async function enviarTransacao(metodo, { value } = {}, descricao = "Transação") {
-  // 1. Bloqueios: uma transação por vez e só na Sepolia.
   if (estado.txPendente) {
-    mostrarAviso("Aguarde a transação anterior terminar.", "erro");
-    return false;
-  }
-  if (!estado.conta) {
-    mostrarAviso("Conecte a carteira antes de continuar.", "erro");
-    return false;
-  }
-  if (!estado.naSepolia) {
-    mostrarAviso("Você está na rede errada. Use a rede Sepolia.", "erro");
+    mostrarPainelTx({ titulo: "Uma transação por vez", situacao: "erro", mensagem: "Aguarde a transação anterior terminar." });
     return false;
   }
   estado.txPendente = true;
   bloquearAcoes(true);
 
-  let sucesso = false;
-  let mensagemErro = null;
-  let linha = null; // <li> da transação (só existe depois que a carteira assina)
-  let hashTx = null; // hash da transação, assim que ela é enviada (para o link do Etherscan)
+  let etapa = 0;
+  let hash;
   try {
-    const opcoes = { from: estado.conta };
+    mostrarPainelTx({ titulo: descricao, etapa });
 
-    // 2. Se a ação envia ETH, confere o saldo antes de incomodar a carteira.
+    // 1. Facilidade: sem conta conectada ou fora da Sepolia, resolve isso no caminho
+    //    (abre a MetaMask para conectar / trocar de rede) em vez de só dar erro.
+    if (!window.ethereum) throw new ErroDeUsuario("Instale a MetaMask para enviar transações.");
+    if (!estado.conta && !(await conectarCarteira())) {
+      throw new ErroDeUsuario("Conecte a carteira para continuar.");
+    }
+    if (!(await verificarRede())) {
+      mostrarPainelTx({ titulo: descricao, etapa, mensagem: "Aceite a troca para a rede Sepolia na MetaMask." });
+      if (!(await trocarParaSepolia()) || !(await verificarRede())) {
+        throw new ErroDeUsuario("Esta ação precisa da rede Sepolia.");
+      }
+      estado.naSepolia = true;
+    }
+
+    // 2. Se a ação envia ETH, confere o saldo (o da última leitura; se parecer pouco, relê).
+    const opcoes = { from: estado.conta };
     if (value) {
-      const saldo = BigInt(await estado.web3.eth.getBalance(estado.conta));
+      let saldo = estado.saldo;
+      if (saldo === null || saldo < value) saldo = BigInt(await estado.web3.eth.getBalance(estado.conta));
       if (saldo < value) {
         throw new ErroDeUsuario(`Saldo insuficiente: você tem ${formatarEth(saldo)} ETH e precisa de ${formatarEth(value)} ETH (mais o gas).`);
       }
       opcoes.value = value.toString();
     }
 
-    // 3. Simulação: .call() roda a função sem gastar gas. Se ela reverteria, o erro
-    //    aparece aqui, com mensagem clara, antes de abrir o pop-up da carteira.
+    // 3. Simulação no nó de leitura: .call() roda a função sem gastar gas. Se ela
+    //    reverteria, o erro aparece aqui, claro, antes de abrir o pop-up da carteira.
     await metodo.call(opcoes);
 
-    // 4. Envio real. A carteira pede confirmação; "transactionHash" chega assim que
-    //    a transação é assinada e enviada (ainda não confirmada).
-    mostrarAviso(`Confirme na MetaMask: ${descricao}`);
-    const recibo = await metodo.send(opcoes).on("transactionHash", (hash) => {
-      hashTx = hash;
-      linha = document.createElement("li");
-      escreverLinhaTx(linha, "pendente", descricao, hash);
-      $("transacoes").querySelector(".sem-tx")?.remove();
-      $("transacoes").prepend(linha);
-      mostrarAviso("Transação enviada. Aguardando confirmação…");
-    });
-
-    // O recibo diz se a execução deu certo (status 1) ou reverteu (status 0).
-    // (No Web3.js v4 um revert minerado normalmente cai no catch; este ramo é só garantia.)
-    sucesso = Number(recibo.status) === 1;
-    if (linha) escreverLinhaTx(linha, sucesso ? "confirmada" : "falhou", descricao, recibo.transactionHash);
-    if (!sucesso) mensagemErro = "A transação foi enviada, mas falhou na blockchain.";
+    // 4. Assinatura: pedido direto à MetaMask, sem o Web3.js consultar bloco, nonce e
+    //    taxas antes (a carteira calcula gas e taxas sozinha). Devolve o hash ao assinar.
+    etapa = 1;
+    mostrarPainelTx({ titulo: descricao, etapa, mensagem: "Abra a MetaMask e confirme a transação." });
+    const tx = { from: estado.conta, to: CONTRATO.endereco, data: metodo.encodeABI() };
+    if (value) tx.value = "0x" + value.toString(16);
+    hash = await window.ethereum.request({ method: "eth_sendTransaction", params: [tx] });
   } catch (e) {
     console.error(e);
-    if (e instanceof ErroDeUsuario) {
-      mensagemErro = e.message;
-    } else if (hashTx) {
-      // A transação já foi enviada: no Web3.js v4, se ela for minerada e reverter,
-      // o send() lança erro (em inglês) em vez de devolver status 0.
-      // Se o usuário já tinha hash, o problema aconteceu na blockchain (ou na espera).
-      mensagemErro = "A transação foi enviada, mas falhou na blockchain. Veja no Etherscan.";
-    } else {
-      mensagemErro = traduzirErro(e);
-    }
-    // A linha ❌ mantém o hash para o usuário abrir a transação no Etherscan.
-    if (linha) escreverLinhaTx(linha, "falhou", descricao, hashTx);
-  } finally {
-    // 5. Libera os botões e relê a blockchain (atualizarTudo também recarrega o histórico).
     estado.txPendente = false;
     bloquearAcoes(false);
-    await atualizarTudo();
-    // O resultado é mostrado por último e permanece até a próxima ação (a atualização
-    // automática não mexe nesta faixa).
-    if (mensagemErro) mostrarAviso(mensagemErro, "erro");
-    else if (sucesso) mostrarAviso(`${descricao}: confirmada.`, "sucesso");
+    mostrarPainelTx({
+      titulo: descricao,
+      etapa,
+      situacao: "erro",
+      mensagem: e instanceof ErroDeUsuario ? e.message : traduzirErro(e),
+    });
+    return false;
   }
+  return acompanharTransacao({ hash, descricao, conta: estado.conta, desde: Date.now() });
+}
+
+// Recibo da transação: pergunta ao nó de leitura e à carteira ao mesmo tempo
+// (vale o que responder primeiro). null = ainda não minerada.
+async function buscarRecibo(hash) {
+  const pedidos = [pedirAoNo("eth_getTransactionReceipt", [hash])];
+  if (window.ethereum) pedidos.push(window.ethereum.request({ method: "eth_getTransactionReceipt", params: [hash] }));
+  const respostas = await Promise.allSettled(pedidos);
+  const achou = respostas.find((r) => r.status === "fulfilled" && r.value);
+  return achou ? achou.value : null;
+}
+
+// Espera o recibo (consulta a cada 1,5 s; um bloco da Sepolia sai a cada ~12 s).
+// Se a transação for acelerada ou cancelada na MetaMask, ela ganha outro hash e a
+// original nunca é minerada: isso é percebido pelo nonce da conta, que passa à frente.
+async function esperarRecibo(hash, conta, desde) {
+  let nonce = null;
+  for (let tentativa = 1; ; tentativa++) {
+    const recibo = await buscarRecibo(hash);
+    if (recibo) return recibo;
+    if (tentativa % 8 === 0) {
+      try {
+        if (nonce === null) {
+          const tx = window.ethereum
+            ? await window.ethereum.request({ method: "eth_getTransactionByHash", params: [hash] })
+            : await pedirAoNo("eth_getTransactionByHash", [hash]);
+          if (tx) nonce = Number(tx.nonce);
+        }
+        if (nonce !== null && Number(await estado.web3.eth.getTransactionCount(conta, "latest")) > nonce) {
+          return (await buscarRecibo(hash)) || { substituida: true };
+        }
+      } catch (e) { console.error(e); }
+      // Mais de 10 minutos sem notícia: desiste de esperar (a transação segue no Etherscan).
+      if (Date.now() - desde > 10 * 60 * 1000) return { semResposta: true };
+    }
+    await esperar(1500);
+  }
+}
+
+// O recibo pode vir de um nó à frente do nó de leitura: espera este chegar ao bloco,
+// senão a tela relida ainda mostraria o estado de antes da transação.
+async function esperarBloco(numero) {
+  for (let i = 0; i < 10; i++) {
+    try { if (Number(await estado.web3.eth.getBlockNumber()) >= numero) return; } catch (e) { /* tenta de novo */ }
+    await esperar(1000);
+  }
+}
+
+// Acompanha uma transação já assinada até o recibo. Também é chamada ao abrir a
+// página, se havia uma transação pendente salva da visita anterior.
+async function acompanharTransacao({ hash, descricao, conta, desde }) {
+  estado.txPendente = true;
+  bloquearAcoes(true);
+  document.title = `⏳ Transação pendente · ${TITULO_PAGINA}`;
+  salvarPendente({ hash, descricao, conta, desde });
+
+  const linha = document.createElement("li");
+  escreverLinhaTx(linha, "pendente", descricao, hash, desde);
+  $("transacoes").querySelector(".sem-tx")?.remove();
+  $("transacoes").prepend(linha);
+  mostrarPainelTx({ titulo: descricao, etapa: 2, hash, desde, mensagem: "Um bloco novo sai a cada ~12 s." });
+
+  let sucesso = false;
+  let final;
+  try {
+    const recibo = await esperarRecibo(hash, conta, desde);
+    if (recibo.substituida) {
+      final = { situacao: "erro", mensagem: "A transação foi substituída na MetaMask (acelerada ou cancelada). Confira o resultado na lista de projetos e no histórico." };
+    } else if (recibo.semResposta) {
+      final = { situacao: "erro", mensagem: "Ainda sem confirmação depois de 10 minutos. Acompanhe pelo Etherscan." };
+    } else {
+      sucesso = Number(recibo.status) === 1;
+      await esperarBloco(Number(recibo.blockNumber));
+      final = sucesso
+        ? { situacao: "ok", mensagem: "Transação confirmada." }
+        : { situacao: "erro", mensagem: "A transação foi enviada, mas falhou na blockchain." };
+    }
+  } catch (e) {
+    console.error(e);
+    final = { situacao: "erro", mensagem: "Não foi possível acompanhar a transação. Veja no Etherscan." };
+  }
+
+  apagarPendente();
+  estado.txPendente = false;
+  bloquearAcoes(false);
+  document.title = TITULO_PAGINA;
+  escreverLinhaTx(linha, sucesso ? "confirmada" : "falhou", descricao, hash);
+  mostrarPainelTx({ titulo: descricao, etapa: sucesso ? 3 : 2, hash, ...final });
+  await atualizarTudo(); // relê a blockchain (projetos, saldo, histórico)
   return sucesso;
 }
 
@@ -1024,6 +1294,7 @@ function traduzirErro(err) {
   if (buscarNoErro(err, (o) => (o.code === 4001 ? true : undefined))) {
     return "Você cancelou a transação na MetaMask.";
   }
+  if (buscarNoErro(err, (o) => (o.code === -32002 ? true : undefined))) return MSG_PEDIDO_PENDENTE;
 
   // Todas as mensagens de texto do erro juntas, para procurar frases conhecidas.
   const textos = [];
@@ -1170,8 +1441,42 @@ async function executarAcao(nome, id, elemento) {
   try {
     await acao(id, elemento);
   } catch (e) {
-    mostrarAviso(e && e.message ? e.message : traduzirErro(e), "erro");
+    // Erro de validação: aparece no painel flutuante, perto de onde a pessoa está.
+    mostrarPainelTx({ titulo: "Confira os dados", situacao: "erro", mensagem: e && e.message ? e.message : traduzirErro(e) });
   }
+}
+
+// Copia texto para a área de transferência. A API moderna pode ficar sem resposta (ex.:
+// permissão pendente); depois de 1 s cai no método antigo (textarea + execCommand).
+async function copiarTexto(texto) {
+  try {
+    if (!navigator.clipboard) throw new Error("sem API");
+    await Promise.race([
+      navigator.clipboard.writeText(texto),
+      esperar(1000).then(() => { throw new Error("sem resposta"); }),
+    ]);
+    return true;
+  } catch (e) {
+    const area = document.createElement("textarea");
+    area.value = texto;
+    area.setAttribute("readonly", "");
+    area.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+    document.body.append(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e2) { /* sem cópia */ }
+    area.remove();
+    return ok;
+  }
+}
+
+// Copia o endereço da conta conectada (clique no endereço do cabeçalho).
+async function copiarEndereco() {
+  if (!estado.conta) return;
+  const botao = $("conta");
+  const ok = await copiarTexto(estado.web3.utils.toChecksumAddress(estado.conta));
+  botao.textContent = ok ? "Copiado ✓" : "Não copiou";
+  setTimeout(() => { botao.textContent = estado.conta ? abreviar(estado.conta) : ""; }, 1500);
 }
 
 // Delegação de eventos: UM listener no documento atende todos os botões, inclusive os
@@ -1180,6 +1485,12 @@ function ligarAcoes() {
   document.addEventListener("click", (e) => {
     const botao = e.target.closest("button[data-acao]");
     if (botao) executarAcao(botao.dataset.acao, botao.dataset.id, botao);
+    // Valores rápidos (0,01 / 0,05 / 0,1 / completar a meta): só preenchem o campo.
+    const chip = e.target.closest("button[data-valor]");
+    if (chip && campo(chip.dataset.alvo)) {
+      campo(chip.dataset.alvo).value = chip.dataset.valor;
+      campo(chip.dataset.alvo).focus();
+    }
     // Filtros da lista de projetos: só redesenham a lista (não leem a blockchain).
     const filtro = e.target.closest("button[data-filtro]");
     if (filtro) {
@@ -1199,6 +1510,14 @@ function ligarAcoes() {
     if (!form) return;
     e.preventDefault(); // não recarregar a página
     executarAcao(form.dataset.acao, null, form);
+  });
+  // Enter no campo de valor do card apoia direto (o campo não fica dentro de um <form>).
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const input = e.target.closest && e.target.closest('input[data-campo^="valor-"]');
+    if (!input) return;
+    e.preventDefault();
+    executarAcao("apoiar", input.dataset.campo.slice("valor-".length), input);
   });
 }
 
@@ -1224,43 +1543,49 @@ async function iniciar() {
   const marcarRolagem = () => $("cabecalho").classList.toggle("rolou", window.scrollY > 40);
   window.addEventListener("scroll", marcarRolagem, { passive: true });
   marcarRolagem();
-  $("btn-conectar").addEventListener("click", conectarCarteira);
-  $("btn-trocar-rede").addEventListener("click", trocarParaSepolia);
-
-  if (!window.ethereum) {
-    await atualizarTudo(); // mostra "Instale a MetaMask"
-    return;
-  }
-
-  estado.web3 = new Web3(window.ethereum);
-  if (contratoConfigurado()) {
-    estado.contrato = new estado.web3.eth.Contract(CONTRATO.abi, CONTRATO.endereco);
-  }
-
-  // Restaura a conexão sem pop-up: eth_accounts só devolve contas se o site já foi autorizado.
-  try {
-    const contas = await window.ethereum.request({ method: "eth_accounts" });
-    estado.conta = contas && contas.length ? contas[0] : null;
-  } catch (e) {
-    estado.conta = null;
-  }
-
-  // Troca de conta na carteira: lista vazia = usuário desconectou.
-  window.ethereum.on("accountsChanged", (contas) => {
-    estado.conta = contas.length ? contas[0] : null;
-    atualizarTudo();
+  // Sem carteira, o botão leva ao download da MetaMask (os projetos aparecem mesmo assim).
+  $("btn-conectar").addEventListener("click", () => {
+    if (window.ethereum) conectarCarteira();
+    else window.open(URL_METAMASK, "_blank", "noopener");
   });
-  // Troca de rede: atualiza sem recarregar a página.
-  window.ethereum.on("chainChanged", () => atualizarTudo());
+  $("btn-trocar-rede").addEventListener("click", trocarParaSepolia);
+  $("conta").addEventListener("click", copiarEndereco);
+  $("painel-tx-fechar").addEventListener("click", () => { $("painel-tx").hidden = true; });
 
-  // Sem conta autorizada, a conexão só acontece no clique em "Conectar carteira".
+  // Leituras pelo nó público: funcionam com ou sem carteira.
+  criarLeitura();
+
+  if (window.ethereum) {
+    // Restaura a conexão sem pop-up: eth_accounts só devolve contas se o site já foi autorizado.
+    try {
+      const contas = await window.ethereum.request({ method: "eth_accounts" });
+      estado.conta = contas && contas.length ? contas[0] : null;
+    } catch (e) {
+      estado.conta = null;
+    }
+    // Troca de conta na carteira: lista vazia = usuário desconectou.
+    window.ethereum.on("accountsChanged", (contas) => {
+      estado.conta = contas.length ? contas[0] : null;
+      atualizarTudo();
+    });
+    // Troca de rede: atualiza sem recarregar a página.
+    window.ethereum.on("chainChanged", () => atualizarTudo());
+  }
+
   await atualizarTudo();
 
-  // Contagem regressiva a cada 1 s (só texto) e releitura leve da blockchain a cada 15 s.
+  // Transação que estava pendente quando a página foi fechada/recarregada: volta a acompanhar.
+  const pendente = lerPendente();
+  if (pendente && pendente.hash) acompanharTransacao(pendente);
+
+  // Contagem regressiva a cada 1 s (só texto). A cada 6 s pergunta o bloco atual ao nó
+  // e só relê tudo quando há bloco novo (ou mudou conta/rede). Ao voltar para a aba, na hora.
   setInterval(atualizarContagens, 1000);
-  setInterval(() => {
-    if (!document.hidden && !usuarioEditando()) atualizarTudo();
-  }, 15000);
+  const atualizarSeVisivel = () => {
+    if (!document.hidden && !usuarioEditando()) atualizarTudo({ forcar: false });
+  };
+  setInterval(atualizarSeVisivel, 6000);
+  document.addEventListener("visibilitychange", atualizarSeVisivel);
 }
 
 iniciar();
