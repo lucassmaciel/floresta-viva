@@ -255,7 +255,7 @@ dev/                            servidor e provedor locais para testar a tela se
 docs/DEPLOY.md                  passo a passo de deploy
 docs/APRESENTACAO.md            roteiro da apresentação e da demo
 docs/slides.pdf                 slides da apresentação (PDF)
-docs/prints/                    prints do Etherscan (deploy, código verificado, apoio e eventos) e da dApp
+docs/prints/                    prints do Etherscan (deploy, código verificado, apoio e eventos), da dApp, do Remix e da MetaMask
 docs/design.md                  design da solução
 docs/plano.md                   plano de implementação
 ```
