@@ -216,7 +216,7 @@ Contas: **Dono** (`0xbcc3b5e06c1bb35458c8de242573dba669154fb6`, quem implantou),
 
 ## 14. Vídeo de demonstração
 
-Link: <!-- PREENCHER: link do vídeo (3 a 5 min) -->
+Link: https://www.youtube.com/watch?v=eyu-SRrCeTk
 
 ## 15. Declaração de uso de IA
 
@@ -254,7 +254,8 @@ scripts/deploy-local.js         deploy no nó Hardhat local (para desenvolviment
 dev/                            servidor e provedor locais para testar a tela sem MetaMask
 docs/DEPLOY.md                  passo a passo de deploy
 docs/APRESENTACAO.md            roteiro da apresentação e da demo
-docs/prints/                    prints do Remix e da dApp
+docs/slides.pdf                 slides da apresentação (PDF)
+docs/prints/                    prints do Etherscan (deploy, código verificado, apoio e eventos) e da dApp
 docs/design.md                  design da solução
 docs/plano.md                   plano de implementação
 ```
